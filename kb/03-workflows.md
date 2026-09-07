@@ -326,7 +326,8 @@ rather than on Redis, and `kb/04-state-machines.md` for the status machine.
 
 1. The member opens the import modal and picks a `.csv` / `.xlsx` where each
    row is an article — title, author, date, URL, plus optional
-   `author_email` / `pulse_type` / `description`. Parsing, header mapping and
+   `author_email` / `pulse_type` / `description` / `resource_type` /
+   `source_url` (the last two added in GOAL-355). Parsing, header mapping and
    per-row validation happen **in the browser** (`article-import.ts`), so the
    preview step can show exactly what will and will not import.
 
@@ -411,8 +412,40 @@ rather than on Redis, and `kb/04-state-machines.md` for the status machine.
   payload the job node carries. Larger backlogs are several jobs, which now
   drain reliably rather than racing a request ceiling.
 - **Pulse types.** `ResourcePulse` (the default — articles are resources),
-  `GoalPulse`, `StoryPulse`. `ResourcePulse` rows also get
-  `resourceType: 'article'`.
+  `GoalPulse`, `StoryPulse`. `ResourcePulse` rows also get a `resourceType`,
+  from the sheet's `resource_type` column when present and `'article'` when not.
+- **`resource_type` and `source_url` (GOAL-355)** are the two optional columns
+  that replaced a pair of member workarounds. Before them the type was appended
+  to the title as free text ("The World Ending Fire - book") and the source link
+  was parked in `description`, where the article read (step 5b) could overwrite
+  it — a bare-URL body counts as a placeholder, so the AI summary replaced it.
+  - `resource_type` → `ResourcePulse.resourceType`, lower-cased and
+    whitespace-collapsed (`normalizeArticleResourceType`) so "Book" and "book"
+    are one filterable value. Deliberately **not** an enum: the SDL declares
+    `resourceType: String!` and GOAL-354 keeps it extensible, so a member's own
+    vocabulary ("ontology", "zine") imports rather than failing the row.
+  - `source_url` → `ResourcePulse.sourceUrl`, a property of its own — where the
+    resource was *found* (a LinkedIn post, a newsletter), as distinct from
+    `location`, which is the resource itself. Nothing in the ingest path writes
+    it, so the summary can never eat it. Validated with the same
+    `normalizeArticleUrl` the `url` column uses; a present-but-unusable value
+    fails the row in the preview rather than being silently dropped.
+  - Both are **additive**: a sheet with neither column parses, validates, and
+    writes exactly as it did before GOAL-355. The aliases are deliberately
+    narrow (`resource_type`/`resourcetype`, `source_url`/`sourceurl`) because a
+    present-but-unusable value fails the row — a wider alias like `source_link`
+    would newly break a sheet that already keeps provenance prose under that
+    header.
+  - Both are **ResourcePulse-only**, since that is the one pulse type declaring
+    them. A goal/story row carrying either column fails in the preview rather
+    than importing and silently dropping the value.
+  - **Re-importing does not RE-type an existing pulse.** `create_pulse`'s
+    enrich branch is fill-gaps-only (`coalesce`), so a pulse the importer
+    already created carries `resourceType: 'article'`, and a re-upload with
+    `resource_type: book` leaves it as `'article'` — while `sourceUrl`, which
+    was null, does get backfilled. The receipt still says "kept it and filled
+    in any missing details", which is true but easy to over-read. Correcting
+    the type of an already-imported pulse is an edit, not a re-import.
 - **`location` and `time`** carry the article's URL and normalized date. A date
   that isn't a calendar date ("Spring 2026") survives verbatim rather than
   failing the row. Pulses the extractor adds from the article default their

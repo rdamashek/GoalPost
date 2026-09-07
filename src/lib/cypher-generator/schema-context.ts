@@ -204,6 +204,14 @@ FieldContext { id, title, emergentName, createdAt }
 FieldPulse { id, title, content, status, intensity, horizon, why, location, time, createdAt }
   - Always co-labeled with one specific pulse subtype:
     GoalPulse, ResourcePulse, StoryPulse, CarePulse, CoreValuePulse.
+  - ResourcePulse additionally carries:
+      resourceType — free-text kind of resource, stored lower-cased
+        ('article', 'book', 'podcast', 'ontology', 'event', …). This is what
+        "show me the books / podcasts in this field" should filter on. It is
+        NOT an enum, so prefer toLower(p.resourceType) = 'book' over an exact
+        match, and never assume the full value set.
+      sourceUrl — where the resource was FOUND (a LinkedIn post, a
+        newsletter), as distinct from location, which is the resource itself.
 
 CORE VALUES — read this before writing any query about values.
   A "core value" / "value" is a pulse, but it does NOT always carry the

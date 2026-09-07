@@ -6,8 +6,10 @@ import {
   type ArticleImportRowInput,
   type ArticleRowExtraction,
   type PersistedArticleRowOutcome,
+  DEFAULT_ARTICLE_RESOURCE_TYPE,
   buildArticleRowContent,
   normalizeArticleDate,
+  normalizeArticleResourceType,
   normalizeArticleUrl,
 } from './article-import'
 import {
@@ -393,6 +395,20 @@ function validateTypedRow(row: ArticleImportRowInput): string | null {
   if (!ALLOWED_ARTICLE_PULSE_TYPES.has(row.pulseType)) {
     return 'Unsupported pulse type — use goal, resource, or story.'
   }
+  // GOAL-355 — optional, so only a value that is present and unusable fails.
+  // Rejected loudly rather than dropped: a member who supplied a source link
+  // must never get a pulse that silently lost it.
+  if (row.sourceUrl?.trim() && !normalizeArticleUrl(row.sourceUrl)) {
+    return 'The source URL must be a valid http(s) link.'
+  }
+  // Mirrors the preview gate: only ResourcePulse declares these two, so a
+  // non-resource row carrying them would have them silently dropped below.
+  if (
+    row.pulseType !== 'ResourcePulse' &&
+    (row.resourceType?.trim() || row.sourceUrl?.trim())
+  ) {
+    return 'resource_type and source_url only apply to resource rows.'
+  }
   return null
 }
 
@@ -461,7 +477,28 @@ async function resolveRowOutcome({
         title: row.title.trim(),
         content: buildArticleRowContent(row),
         pulseType: row.pulseType,
-        resourceType: row.pulseType === 'ResourcePulse' ? 'article' : undefined,
+        // GOAL-355 — the sheet's `resource_type` column wins; the pre-GOAL-355
+        // hardcoded default stands in when the column is absent or blank, so a
+        // sheet in the old format is unaffected. Only ResourcePulse rows carry
+        // the property — it is the only pulse type that declares it.
+        resourceType:
+          row.pulseType === 'ResourcePulse'
+            ? (normalizeArticleResourceType(row.resourceType) ??
+              DEFAULT_ARTICLE_RESOURCE_TYPE)
+            : undefined,
+        // GOAL-355 — a property of its own, never the pulse body: the article
+        // read (GOAL-344) may replace a placeholder `content` with the
+        // AI-generated summary, which is exactly how the source link kept
+        // getting lost when members carried it in the description column.
+        // Gated on ResourcePulse for the same reason as `resourceType` above:
+        // it is the only pulse type that declares the property. Writing it onto
+        // a GoalPulse/StoryPulse would store member data the SDL then drops at
+        // serialization — invisible, unreadable, and outside the documented
+        // model (kb/05-data-entities.md).
+        sourceUrl:
+          row.pulseType === 'ResourcePulse' && row.sourceUrl
+            ? (normalizeArticleUrl(row.sourceUrl) ?? undefined)
+            : undefined,
         location: normalizeArticleUrl(row.url) ?? undefined,
         time: normalizeArticleDate(row.date ?? '') || undefined,
         attributedToPersonId: author.personId,

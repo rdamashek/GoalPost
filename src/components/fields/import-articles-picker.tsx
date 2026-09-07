@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import {
   ARTICLE_TEMPLATE_COLUMNS,
   ARTICLE_TEMPLATE_SAMPLE_ROW,
@@ -30,6 +30,21 @@ function downloadCsvTemplate() {
   URL.revokeObjectURL(url)
 }
 
+/**
+ * A spreadsheet column name inside prose (GOAL-355). The *tint* comes from
+ * `--gp-primary` so the chip re-themes, but the TEXT is ink, not the primary
+ * color: `--gp-primary` at this size fails WCAG AA on a light surface (#137fec
+ * on white is ~3.98:1, and `theme-warm`'s #ffc233 is ~1.6:1). Same reasoning
+ * the preview card's metadata lines use.
+ */
+function ColumnName({ children }: { children: ReactNode }) {
+  return (
+    <code className="rounded bg-gp-primary/10 px-1 py-px font-mono text-[11px] text-gp-ink-strong dark:text-white">
+      {children}
+    </code>
+  )
+}
+
 interface ImportArticlesPickerProps {
   onFileSelected: (file: File | null) => void
 }
@@ -43,9 +58,10 @@ export function ImportArticlesPicker({
     <>
       <p className="text-sm text-gp-ink-muted dark:text-gp-ink-soft shrink-0">
         Upload a spreadsheet where each row is an article — title, author, date,
-        and URL. Each row becomes a pulse in this field, attributed to its
-        author, and the link is opened and read so the article&apos;s details
-        land in the field too.
+        and URL, plus optional <ColumnName>resource_type</ColumnName> and{' '}
+        <ColumnName>source_url</ColumnName> columns. Each row becomes a pulse in
+        this field, attributed to its author, and the link is opened and read so
+        the article&apos;s details land in the field too.
       </p>
 
       <label

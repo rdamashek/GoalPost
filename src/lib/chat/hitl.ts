@@ -335,6 +335,14 @@ interface CreatePulseInput extends ContextLocatorInput {
   why?: string
   location?: string
   time?: string
+  /**
+   * GOAL-355 — where the resource was *found* (a LinkedIn post, a newsletter),
+   * as distinct from `location`, which is the resource itself. Written by the
+   * bulk article import from the sheet's `source_url` column. A property of its
+   * own precisely so it survives the doc-ingest pass that may replace a
+   * placeholder `content` with an AI-generated summary.
+   */
+  sourceUrl?: string
   /** Optional source Document — when present, EXTRACTED_FROM edge is created (ADR-0002). */
   documentId?: string
   /** Optional ingest thread — slice 7: stamps the Log.metadata audit trail. */
@@ -1268,6 +1276,7 @@ async function createPulseAuthorized(
           p.why = coalesce(p.why, $why),
           p.location = coalesce(p.location, $location),
           p.time = coalesce(p.time, $time),
+          p.sourceUrl = coalesce(p.sourceUrl, $sourceUrl),
           p.updatedAt = datetime()
       CREATE (log:Log {
         id: $enrichLogId,
@@ -1299,6 +1308,7 @@ async function createPulseAuthorized(
         why: input.why?.trim() || null,
         location: input.location?.trim() || null,
         time: input.time?.trim() || null,
+        sourceUrl: input.sourceUrl?.trim() || null,
         enrichLogId,
         enrichDescription,
       }
@@ -1411,6 +1421,9 @@ async function createPulseAuthorized(
     FOREACH (_ IN CASE WHEN $time IS NULL THEN [] ELSE [1] END |
       SET pulse.time = $time
     )
+    FOREACH (_ IN CASE WHEN $sourceUrl IS NULL THEN [] ELSE [1] END |
+      SET pulse.sourceUrl = $sourceUrl
+    )
     CREATE (context)-[:HAS_PULSE]->(pulse)
     // Canonical author edge: the attributed person when one was verified
     // above, otherwise the acting user. Exactly one INITIATED_BY either way —
@@ -1467,6 +1480,7 @@ async function createPulseAuthorized(
     why: input.why?.trim() || null,
     location: input.location?.trim() || null,
     time: input.time?.trim() || null,
+    sourceUrl: input.sourceUrl?.trim() || null,
   })
 
   if (!rows || rows.length === 0) {
