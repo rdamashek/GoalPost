@@ -39,6 +39,7 @@ import {
 } from './field-context-sections'
 import { dispatchOpenInfoDrawer } from './types'
 import { partitionFieldRoster } from '@/lib/field-roster-visibility'
+import { useResonanceSuggestionCount } from '@/hooks/useResonanceSuggestionCount'
 
 /**
  * Field context inspection — pulse counts, recent pulses, resonances,
@@ -84,6 +85,17 @@ export const FieldContextDetailsBody: FC<{
   }>(GET_DOCUMENTS_BY_FIELD_CONTEXT, {
     variables: { fieldContextId: contextId },
     fetchPolicy: 'cache-and-network',
+  })
+
+  // GOAL-352: the same passive pending-suggestion indicator the field page
+  // carries (GOAL-348). Read before the early returns below because it is a
+  // hook — it no-ops on a blank spaceId and re-runs once the field query
+  // resolves its parent Space. Scoped to THIS field: an empty contextId would
+  // silently widen the number to the whole Space.
+  const { count: pendingSuggestionCount } = useResonanceSuggestionCount({
+    spaceId: data?.fieldContexts?.[0]?.space?.[0]?.id ?? '',
+    contextId: contextId || undefined,
+    status: 'pending',
   })
 
   // GOAL-346: the People section below is filtered against the documents
@@ -251,7 +263,17 @@ export const FieldContextDetailsBody: FC<{
 
       <PulsesSection pulses={allPulses} />
 
-      <ResonancesSection resonances={resonances} />
+      <ResonancesSection
+        resonances={resonances}
+        pendingSuggestionCount={pendingSuggestionCount}
+        // The drawer is an inspector — the review modal lives on the full
+        // field page (WF-07), so the chip hands the reader off there rather
+        // than duplicating the queue here. Any Space role may review-read, so
+        // this is not gated on edit permission.
+        onReviewSuggestions={() =>
+          router.push(`/protected/dashboard/field-context/${context.id}`)
+        }
+      />
 
       <PeopleSection people={people} />
 
