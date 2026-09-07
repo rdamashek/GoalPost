@@ -3,7 +3,7 @@
 import { useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useApolloClient, useQuery, useMutation } from '@apollo/client/react'
-import { useEffect, useState, useMemo, type FC } from 'react'
+import { useEffect, useState, useMemo, useCallback, type FC } from 'react'
 import { toast } from 'sonner'
 import { formatDistanceToNow } from 'date-fns'
 import { dispatchOpenInfoDrawer } from '@/components/dashboard/entity-info-drawer'
@@ -73,11 +73,7 @@ import { PromiseWeaveModal } from '@/components/fields/promise-weave-modal'
 import { usePromiseWeaves } from '@/hooks/usePromiseWeaves'
 import { WEAVE_STATUS } from '@/lib/promise-weave'
 import { cn } from '@/lib/utils'
-import {
-  useApp,
-  useFocalEntity,
-  usePageContext,
-} from '@/contexts'
+import { useApp, useFocalEntity, usePageContext } from '@/contexts'
 import { usePulseSharing } from '@/hooks/usePulseSharing'
 import { FieldContextSections } from '@/components/fields/field-context-sections'
 import { ArticleImportStatusSection } from '@/components/fields/article-import-status-section'
@@ -97,6 +93,7 @@ import { deriveCanEditContent } from '@/hooks/use-field-context-permissions'
 import { useRouteFocalScope } from '@/lib/focal-entity/use-route-focal-scope'
 import { useResonanceDiscovery } from '@/hooks/useResonanceDiscovery'
 import { useResonanceSuggestions } from '@/hooks/useResonanceSuggestions'
+import { useResonanceSuggestionCount } from '@/hooks/useResonanceSuggestionCount'
 
 export default function FieldContextDetailsPage() {
   const router = useRouter()
@@ -193,7 +190,6 @@ export default function FieldContextDetailsPage() {
       setIsCreatePulseModalOpen(true)
     })
   }, [contextId])
-
 
   const { data, loading, error, refetch } = useQuery(
     GET_FIELD_CONTEXT_DETAILS,
@@ -299,12 +295,39 @@ export default function FieldContextDetailsPage() {
     declineSuggestion,
   } = useResonanceSuggestions({ spaceId, filter: 'all', enabled: false })
 
+  // GOAL-348: the pending count IS the passive indicator, so it must load with
+  // the page. It is deliberately a separate, count-only request — the list hook
+  // above stays lazy because its payload embeds both pulses' full content for
+  // every suggestion, which is the modal's need, not a badge's.
+  const {
+    count: pendingSuggestionCount,
+    refetch: refetchPendingSuggestionCount,
+  } = useResonanceSuggestionCount({
+    spaceId,
+    // `spaceId` is read off the field query, which is skipped while `contextId`
+    // is empty — so there is no render where the id below is blank but the hook
+    // still fires. The `|| undefined` is belt-and-braces for that ordering, NOT
+    // a guard in its own right: an empty contextId would widen the count to the
+    // whole Space, which is why the id must never reach here unresolved.
+    contextId: contextId || undefined,
+    status: 'pending',
+  })
+
+  // Opening the review modal must NEVER imply a discovery sweep (WF-06/WF-07
+  // are separate steps): this only pulls the suggestions that already exist.
+  const openSuggestionsModal = useCallback(() => {
+    setIsDiscoverModalOpen(true)
+    void refetchSuggestions()
+  }, [refetchSuggestions])
+
   const { triggerDiscovery, isLoading: isDiscoveringResonances } =
     useResonanceDiscovery({
       spaceId,
       onSuccess: () => {
         setIsDiscoverModalOpen(true)
         void refetchSuggestions()
+        // A sweep mints new `pending` suggestions — keep the badge honest.
+        void refetchPendingSuggestionCount()
       },
     })
 
@@ -1278,8 +1301,8 @@ export default function FieldContextDetailsPage() {
             </h2>
 
             <p className="text-sm text-gp-ink-muted dark:text-gp-ink-soft mb-3">
-              Are you sure you want to delete this field? This action cannot
-              be undone.
+              Are you sure you want to delete this field? This action cannot be
+              undone.
               {pulses && pulses.length > 0 && (
                 <span className="text-xs mt-2 block">
                   This will also delete its {pulses.length} pulse
@@ -1357,11 +1380,7 @@ export default function FieldContextDetailsPage() {
                   })
                 }
               />
-              <TopBarPill
-                icon="edit"
-                label="Edit"
-                onClick={handleEditStart}
-              />
+              <TopBarPill icon="edit" label="Edit" onClick={handleEditStart} />
               {canEditContent && (
                 <TopBarPill
                   icon="move_down"
@@ -1476,10 +1495,7 @@ export default function FieldContextDetailsPage() {
             onChanged={() => refetch()}
           />
 
-          <DocumentList
-            documents={documents}
-            onRefetch={refetchDocuments}
-          />
+          <DocumentList documents={documents} onRefetch={refetchDocuments} />
 
           {/* GOAL-336 — server-driven import status. Renders nothing unless
               this member has queued imports for this field, so it costs no
@@ -1510,6 +1526,11 @@ export default function FieldContextDetailsPage() {
                 : undefined
             }
             isDiscoveringResonances={isDiscoveringResonances}
+            pendingSuggestionCount={pendingSuggestionCount}
+            // Reviewing is a read-then-decide step open to any Space role
+            // (kb/02) — the accept/decline routes re-gate the write on
+            // canEditContent, so a GUEST can look without being able to act.
+            onReviewSuggestions={spaceId ? openSuggestionsModal : undefined}
             onOpenShare={(pulseIds, mode) => {
               setBulkInitialPulseIds(pulseIds)
               setBulkInitialMode(mode)
@@ -1578,7 +1599,6 @@ export default function FieldContextDetailsPage() {
               })
             }
           />
-
         </div>
       </main>
 
@@ -1834,20 +1854,44 @@ export default function FieldContextDetailsPage() {
           spaceId={spaceId}
           suggestions={resonanceSuggestions}
           loading={resonanceSuggestionsLoading}
+          // Reviewing is open to every Space role, but CONFIRMING or REJECTING
+          // needs canEditContent (kb/02-user-roles.md). The accept/decline
+          // routes enforce that server-side, and the modal hides a control whose
+          // handler is undefined — so omitting these for a GUEST is what stops
+          // them being shown buttons that can only ever 403. Before GOAL-348 the
+          // modal was unreachable without edit permission, so this gate had no
+          // client-side counterpart to be missing.
+          //
           // Accepting a suggestion writes a real ResonanceLink server-side, so
           // refetch the field details to surface it in the Resonances section.
-          onAccept={async (id) => {
-            await acceptSuggestion(id)
-            await refetch()
+          onAccept={
+            canEditContent
+              ? async (id) => {
+                  await acceptSuggestion(id)
+                  await refetch()
+                }
+              : undefined
+          }
+          onAcceptAll={
+            canEditContent
+              ? async (minConfidence) => {
+                  const accepted = await acceptAllAboveConfidence(minConfidence)
+                  // Newly-created ResonanceLinks surface in the Resonances
+                  // section.
+                  await refetch()
+                  return accepted
+                }
+              : undefined
+          }
+          onDecline={canEditContent ? declineSuggestion : undefined}
+          // The modal awaits onRefresh after EVERY accept / decline / bulk
+          // accept, so this is the single place the badge needs re-counting —
+          // duplicating it inside each handler above just doubled the request
+          // (and the list refetch it rides along with) per reviewed card.
+          onRefresh={async () => {
+            await refetchSuggestions()
+            await refetchPendingSuggestionCount()
           }}
-          onAcceptAll={async (minConfidence) => {
-            const accepted = await acceptAllAboveConfidence(minConfidence)
-            // Newly-created ResonanceLinks surface in the Resonances section.
-            await refetch()
-            return accepted
-          }}
-          onDecline={declineSuggestion}
-          onRefresh={refetchSuggestions}
         />
       ) : null}
     </div>
