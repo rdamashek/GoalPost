@@ -128,7 +128,14 @@ export function NotificationPanel({ isOpen, onClose }: NotificationPanelProps) {
   }
 
   return (
-    <div className="gp-glass fixed inset-x-3 top-20 max-h-[70vh] sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-96 sm:max-h-[28rem] rounded-2xl shadow-xl z-50 flex flex-col overflow-hidden">
+    // Opaque surface, not `gp-glass`. This panel renders inside the studio
+    // header, which is itself `gp-glass` — an ancestor `backdrop-filter`
+    // establishes a backdrop root, so a nested `backdrop-filter` has nothing
+    // left to sample and silently no-ops. All that survived was the 70%-alpha
+    // glass fill, which let the page bleed through the notification text.
+    // `--gp-surface-strong` is fully opaque in light and dark across all five
+    // themes, and matches the user menu dropdown beside it.
+    <div className="bg-gp-surface-strong border border-gp-glass-border fixed inset-x-3 top-20 max-h-[70vh] sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-96 sm:max-h-[28rem] rounded-2xl shadow-xl z-50 flex flex-col overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between gap-2 px-4 py-3 border-b border-gp-glass-border">
         <div className="flex items-center gap-2 min-w-0">

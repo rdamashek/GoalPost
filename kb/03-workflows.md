@@ -276,6 +276,15 @@ See ADR-014 (dedicated extraction endpoint) and ADR-015 (Document + blob storage
    switches to the new ingest thread so the user sees a record of what
    ran, plus a one-line "Created N entities" header. Partial failures
    render per-row.
+
+   This auto-switch is **in-session only** — a client-side event
+   (`emitOpenAssistantThread`, `src/lib/simulation/assistant-panel-events.ts`)
+   that the studio shell subscribes to. Ingest does **not** pin the thread
+   server-side: on the member's *next* load the chat panel opens on an empty
+   conversation (GOAL-345) and this thread is simply listed first in the
+   switcher. That matters most for the cron worker, which finishes ingests
+   while nobody is watching — previously every subsequent load dropped the
+   member into an "Uploaded ….pdf" thread they never opened.
 8. Re-extract reuses the stored blob + original hint, creates a new
    ingest thread, refreshes the summary + concepts, and auto-executes
    the new proposals. Delete removes the blob and Document node;

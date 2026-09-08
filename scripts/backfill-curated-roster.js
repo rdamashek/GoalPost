@@ -28,21 +28,54 @@
  * flag, and after it ships this only ever makes people MORE visible.
  *
  * Usage:
- *   node scripts/backfill-curated-roster.js            # dry run, reports only
- *   node scripts/backfill-curated-roster.js --apply    # writes
+ *   node scripts/backfill-curated-roster.js                    # dry run, dev
+ *   node scripts/backfill-curated-roster.js --apply            # writes to dev
+ *   node scripts/backfill-curated-roster.js demo               # dry run, demo
+ *   node scripts/backfill-curated-roster.js demo --apply       # writes to demo
  *
- * Reads NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD from `.env.local`, the same as
- * `scripts/init-db.js`. Point it at one database at a time and check the
- * dry-run count before applying.
+ * The optional first argument is a PROFILE resolving to `.env.<profile>`,
+ * matching `scripts/clone-neo4j.ts`: `local` (default, dev), `demo`,
+ * `production`. Env files are resolved against the REPO ROOT rather than
+ * process.cwd(), so running from another directory cannot silently target a
+ * different database. Always read the dry-run count before applying.
  */
 
+import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import neo4j from 'neo4j-driver'
-import dotenv from 'dotenv'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-dotenv.config({ path: path.join(__dirname, '../.env.local') })
+const REPO_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..'
+)
+
+/**
+ * Minimal env-file reader — deliberately NOT dotenv, which mutates
+ * process.env. Reading each profile into its own object is what keeps two
+ * profiles from colliding on the same variable names (the same reasoning
+ * clone-neo4j.ts and migrate-prod-to-dev.ts document).
+ */
+function readEnvFile(filename) {
+  const filePath = path.join(REPO_ROOT, filename)
+  if (!fs.existsSync(filePath)) return {}
+  const out = {}
+  for (const rawLine of fs.readFileSync(filePath, 'utf8').split('\n')) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const eq = line.indexOf('=')
+    if (eq < 0) continue
+    let value = line.slice(eq + 1).trim()
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1)
+    }
+    out[line.slice(0, eq).trim()] = value
+  }
+  return out
+}
 
 // Anchored on the field's OWN documents: `(c)-[:HAS_DOCUMENT]->(d)`. A person
 // extracted somewhere else entirely is hand-added as far as THIS field is
@@ -56,24 +89,39 @@ const MATCH_HAND_ADDED = `
 `
 
 async function main() {
-  const apply = process.argv.includes('--apply')
-  const uri = process.env.NEO4J_URI
+  const args = process.argv.slice(2)
+  const apply = args.includes('--apply')
+  const profile = args.find((a) => !a.startsWith('--')) || 'local'
+  const envFile = `.env.${profile}`
+  const env = readEnvFile(envFile)
+
+  const uri = env.NEO4J_URI
   // `.env.local` uses NEO4J_USERNAME; init-db.js reads NEO4J_USER but masks
   // the difference behind a 'neo4j' default. Accept both, prefer the one the
   // env actually sets.
-  const user = process.env.NEO4J_USERNAME || process.env.NEO4J_USER
-  const password = process.env.NEO4J_PASSWORD
+  const user = env.NEO4J_USERNAME || env.NEO4J_USER
+  const password = env.NEO4J_PASSWORD
 
   // No localhost defaults here, unlike init-db.js: this script WRITES to
   // whatever it connects to, and silently falling back to a local database
   // would make a misconfigured run look like a successful one.
   if (!uri || !user || !password) {
     console.error(
-      'Missing NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD — set them in .env.local.'
+      `Missing NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD in ${envFile}.`
     )
     process.exit(1)
   }
-  console.log(`Target: ${uri}\n`)
+  // Print the profile AND the host every run: this script writes, and the
+  // single most costly mistake it can make is writing to the wrong database.
+  const host = (() => {
+    try {
+      return new URL(uri).host
+    } catch {
+      return uri
+    }
+  })()
+  console.log(`Profile: ${profile}  (${envFile})`)
+  console.log(`Target:  ${host}\n`)
 
   const driver = neo4j.driver(uri, neo4j.auth.basic(user, password))
   const session = driver.session()

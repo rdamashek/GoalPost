@@ -2,13 +2,13 @@
 
 import { SectionHeader } from '@/components/persons/section-header'
 import { ProfileCard } from '@/components/persons/profile-card'
-import { formatResonanceLabel } from '@/utils/graph-utils'
-import { cn } from '@/lib/utils'
 import type { PulseAuthorLike } from '@/lib/pulse-author'
 import { PulsesSection } from './pulses-section'
 import { PromiseWeavesSection } from './promise-weaves-section'
 import type { WeaveRecord } from './promise-weaves-section'
-import { EmptySection, getPulseTypeLabel } from './field-section-primitives'
+import { ResonancesSection } from './resonances-section'
+import type { ResonanceRecord } from './resonances-section'
+import { EmptySection } from './field-section-primitives'
 
 type PulseRecord = {
   __typename: string
@@ -18,25 +18,6 @@ type PulseRecord = {
   createdAt: string
   initiatedBy?: PulseAuthorLike[] | null
   createdBy?: PulseAuthorLike[] | null
-}
-
-type ResonancePulseRecord = {
-  __typename: string
-  id: string
-  title: string
-  content: string
-  createdAt: string
-}
-
-type ResonanceRecord = {
-  id: string
-  label: string
-  description?: string | null
-  confidence?: number | null
-  evidence?: string | null
-  createdAt: string
-  source?: ResonancePulseRecord[] | null
-  target?: ResonancePulseRecord[] | null
 }
 
 type SpaceRecord = {
@@ -79,6 +60,14 @@ type FieldContextSectionsProps = {
   /** True while a discovery run is in flight — disables the Discover button and
    *  swaps its icon for a spinner. */
   isDiscoveringResonances?: boolean
+  /** GOAL-348: how many `pending` ResonanceSuggestions are anchored in THIS
+   *  field and waiting for human review (WF-07). Zero renders no affordance at
+   *  all — never a "0" chip. */
+  pendingSuggestionCount?: number
+  /** Opens the suggestions review modal directly, WITHOUT running a discovery
+   *  sweep. Any Space role may review-read, so this is not gated on edit
+   *  permission the way `onDiscoverResonances` is. Omit to hide. */
+  onReviewSuggestions?: () => void
   /** Legacy bulk-share entry attached to the Pulses section header. Used only
    *  when `onOpenShare` is not provided (surfaces not yet wired for the richer
    *  select-and-share flow). Omit to hide. */
@@ -117,11 +106,6 @@ type FieldContextSectionsProps = {
   onPersonClick?: (personId: string) => void
 }
 
-function getResonanceEndpointLabel(pulse?: ResonancePulseRecord): string {
-  if (!pulse) return 'Unknown pulse'
-  return `${getPulseTypeLabel(pulse.__typename)}: ${pulse.title}`
-}
-
 export function FieldContextSections({
   createdDate,
   pulses,
@@ -135,6 +119,8 @@ export function FieldContextSections({
   onAddResonance,
   onDiscoverResonances,
   isDiscoveringResonances = false,
+  pendingSuggestionCount = 0,
+  onReviewSuggestions,
   onSharePulses,
   onOpenShare,
   onUploadDocument,
@@ -273,121 +259,16 @@ export function FieldContextSections({
         onSharePulses={onSharePulses}
       />
 
-      <div className="flex flex-col gap-4 md:col-span-2">
-        <div className="flex items-center justify-between gap-2">
-          <SectionHeader icon="hub" title="Resonances" />
-          <div className="flex items-center gap-1.5 shrink-0">
-            {onDiscoverResonances ? (
-              <button
-                onClick={() => onDiscoverResonances()}
-                disabled={isDiscoveringResonances}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gp-accent-glow/40 bg-gp-accent-glow/10 hover:bg-gp-accent-glow/20 text-gp-ink-strong dark:text-white transition-colors text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-gp-accent-glow/10 cursor-pointer"
-                aria-label="Discover resonances"
-                // Discovery scans the whole parent Space's pulses (WF-06), so it
-                // isn't gated on this field's pulse count the way manual linking
-                // is — a field with few pulses can still surface cross-field
-                // resonances in the same Space.
-                title="Let AI suggest resonances across this space"
-              >
-                <span
-                  className={cn(
-                    'material-symbols-outlined text-sm',
-                    isDiscoveringResonances && 'animate-spin'
-                  )}
-                >
-                  {isDiscoveringResonances ? 'progress_activity' : 'auto_awesome'}
-                </span>
-                <span className="hidden sm:inline">
-                  {isDiscoveringResonances ? 'Discovering…' : 'Discover'}
-                </span>
-              </button>
-            ) : null}
-            <button
-              onClick={() => onAddResonance()}
-              disabled={pulses.length < 2}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gp-primary/30 bg-gp-primary/10 hover:bg-gp-primary/20 text-gp-primary dark:border-gp-primary/40 dark:bg-gp-primary/20 dark:hover:bg-gp-primary/30 transition-colors text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-gp-primary/10 cursor-pointer"
-              aria-label={
-                pulses.length < 2
-                  ? 'Add at least 2 pulses to link'
-                  : 'Link pulses'
-              }
-              title={
-                pulses.length < 2
-                  ? 'Add at least 2 pulses to create a resonance link'
-                  : ''
-              }
-            >
-              <span className="material-symbols-outlined text-sm">add</span>
-              <span className="hidden sm:inline">Link Pulses</span>
-            </button>
-          </div>
-        </div>
-        {resonances.length === 0 ? (
-          <EmptySection
-            icon="hub"
-            title={
-              pulses.length < 2 ? 'No resonances yet' : 'No resonances yet'
-            }
-            body={
-              pulses.length < 2
-                ? 'Resonances connect two pulses — add at least two pulses, then link the ones that resonate.'
-                : 'Resonances surface meaningful connections between pulses. Link two that go together, or let the assistant suggest some.'
-            }
-            cta={
-              pulses.length >= 2
-                ? { label: 'Link pulses', icon: 'add', onClick: onAddResonance }
-                : undefined
-            }
-          />
-        ) : (
-          <ProfileCard>
-            <div className="space-y-3">
-              {resonances.map((resonance, idx) => {
-                const source = resonance.source?.[0]
-                const target = resonance.target?.[0]
-
-                return (
-                  <div
-                    key={resonance.id}
-                    onClick={() => onResonanceClick(resonance.id)}
-                    className={
-                      idx > 0
-                        ? 'border-t border-gp-glass-border pt-3 cursor-pointer hover:bg-gp-glass-bg/50 dark:hover:bg-white/5 transition-colors rounded px-2 -mx-2'
-                        : 'cursor-pointer hover:bg-gp-glass-bg/50 dark:hover:bg-white/5 transition-colors rounded px-2 -mx-2'
-                    }
-                  >
-                    <div className="flex justify-between items-start gap-4 mb-1">
-                      <div className="flex-1 min-w-0 space-y-1">
-                        <span className="text-[9px] uppercase font-semibold text-gp-primary block">
-                          {formatResonanceLabel(resonance.label)}
-                        </span>
-                        <h4 className="text-xs font-bold text-gp-ink-strong dark:text-white leading-relaxed break-words">
-                          {getResonanceEndpointLabel(source)}
-                          <span className="text-gp-ink-muted dark:text-gp-ink-soft font-normal">
-                            {' '}
-                            →{' '}
-                          </span>
-                          {getResonanceEndpointLabel(target)}
-                        </h4>
-                      </div>
-                    </div>
-                    {resonance.description && (
-                      <p className="text-[11px] text-gp-ink-muted dark:text-gp-ink-soft leading-relaxed mt-1">
-                        {resonance.description}
-                      </p>
-                    )}
-                    {!resonance.description && resonance.evidence && (
-                      <p className="text-[11px] text-gp-ink-muted dark:text-gp-ink-soft leading-relaxed mt-1">
-                        {resonance.evidence}
-                      </p>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          </ProfileCard>
-        )}
-      </div>
+      <ResonancesSection
+        resonances={resonances}
+        pulseCount={pulses.length}
+        onAddResonance={onAddResonance}
+        onResonanceClick={onResonanceClick}
+        onDiscoverResonances={onDiscoverResonances}
+        isDiscoveringResonances={isDiscoveringResonances}
+        pendingSuggestionCount={pendingSuggestionCount}
+        onReviewSuggestions={onReviewSuggestions}
+      />
 
       <PromiseWeavesSection
         weaves={weaves}

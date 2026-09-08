@@ -15,8 +15,11 @@ interface ResonanceSuggestionItemProps {
   targetPulseId: string
   targetPulseContent: string
   contextTitle: string
-  onAccept: (id: string) => Promise<void>
-  onDecline: (id: string) => Promise<void>
+  /** Omit BOTH to render the suggestion read-only — a viewer without
+   *  `canEditContent` (a WeSpace GUEST) may read the review queue but cannot
+   *  act on it, and must not be shown controls that can only 403. */
+  onAccept?: (id: string) => Promise<void>
+  onDecline?: (id: string) => Promise<void>
   isLoading?: boolean
 }
 
@@ -48,7 +51,10 @@ export function ResonanceSuggestionItem({
   onDecline,
   isLoading = false,
 }: ResonanceSuggestionItemProps) {
+  const canReview = Boolean(onAccept || onDecline)
+
   const handleAccept = async () => {
+    if (!onAccept) return
     try {
       await onAccept(id)
     } catch (error) {
@@ -57,6 +63,7 @@ export function ResonanceSuggestionItem({
   }
 
   const handleDecline = async () => {
+    if (!onDecline) return
     try {
       await onDecline(id)
     } catch (error) {
@@ -120,26 +127,32 @@ export function ResonanceSuggestionItem({
         <p className="text-sm text-blue-800 dark:text-blue-200">{evidence}</p>
       </div>
 
-      {/* Actions */}
-      <div className="flex gap-3">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleDecline}
-          disabled={isLoading}
-          className="flex-1"
-        >
-          Decline
-        </Button>
-        <Button
-          size="sm"
-          onClick={handleAccept}
-          disabled={isLoading}
-          className="flex-1"
-        >
-          {isLoading ? 'Processing...' : 'Accept'}
-        </Button>
-      </div>
+      {/* Actions — hidden entirely for a read-only viewer */}
+      {canReview && (
+        <div className="flex gap-3">
+          {onDecline && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleDecline}
+              disabled={isLoading}
+              className="flex-1"
+            >
+              Decline
+            </Button>
+          )}
+          {onAccept && (
+            <Button
+              size="sm"
+              onClick={handleAccept}
+              disabled={isLoading}
+              className="flex-1"
+            >
+              {isLoading ? 'Processing...' : 'Accept'}
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   )
 }

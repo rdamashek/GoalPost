@@ -1,14 +1,18 @@
 /**
- * GET /api/chat/simulation/thread
+ * GET /api/chat/simulation/thread?id=<threadId>
  *
- * Returns the authenticated user's active ConversationThread so the AI
- * assistant panel can hydrate its chat runtime with prior turns on mount
- * (panel re-open, page reload, multi-device sign-in).
+ * Returns one of the authenticated user's ConversationThreads so the AI
+ * assistant panel can hydrate its chat runtime with that thread's prior turns.
+ *
+ * `id` is required (GOAL-345). The panel opens on an empty conversation on
+ * every initial load, so hydration only ever happens for a thread the member
+ * explicitly picked from the switcher — there is no "give me whatever thread
+ * was most recent" mode.
  *
  * Response shape:
  *
- *   { thread: null }                               // user has no thread yet
- *   { thread: { id, createdAt, lastTurnAt,         // active thread
+ *   { thread: null }                               // no such thread for them
+ *   { thread: { id, createdAt, lastTurnAt,
  *               turns: [{ id, role, content,
  *                         parts, order, createdAt }] } }
  *
@@ -17,10 +21,7 @@
  * anonymous thread — chat history is private.
  */
 import { resolveAuthenticatedUserId } from '@/app/api/auth/utils'
-import {
-  getActiveConversationThread,
-  getConversationThread,
-} from '@/lib/simulation/conversation-thread.service'
+import { getConversationThread } from '@/lib/simulation/conversation-thread.service'
 
 export async function GET(req: Request) {
   const userId = resolveAuthenticatedUserId(req)
@@ -32,9 +33,14 @@ export async function GET(req: Request) {
   }
 
   const threadId = new URL(req.url).searchParams.get('id')
-  const thread = threadId
-    ? await getConversationThread(userId, threadId)
-    : await getActiveConversationThread(userId)
+  if (!threadId) {
+    return new Response(JSON.stringify({ error: 'id is required' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  const thread = await getConversationThread(userId, threadId)
   return new Response(JSON.stringify({ thread }), {
     status: 200,
     headers: {

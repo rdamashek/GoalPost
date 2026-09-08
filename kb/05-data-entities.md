@@ -626,17 +626,30 @@ semantic org discovery is a follow-up (resonance is pulse↔pulse today).
 
 Server-side persisted AI assistant chat thread. A `User` can own many — one
 implicit "reflective" thread created on first message, plus any threads
-spawned via the sidebar "+" or doc-ingest. The active thread on hydration is
-either the pinned `User.lastViewedThreadId` or, failing that, the most
-recently updated. Survives page reloads and reopens of the assistant panel;
-replays via `useChatRuntime({ messages })` on mount.
+spawned via the sidebar "+" or doc-ingest.
+
+**Hydration (GOAL-345): the panel opens on an empty conversation on every
+initial load** — fresh navigation, hard refresh, new tab. No thread is
+restored on arrival, and no thread node is created just by loading the app.
+Threads are hydrated only when the member explicitly picks one from the
+switcher / threads sidebar (`GET /api/chat/simulation/thread?id=…`, which
+requires an id), and the landing conversation creates its thread lazily on the
+first send so that turn carries an explicit id rather than MERGEing onto the
+implicit `ownerId`-keyed thread. Replay is via `useChatRuntime({ messages })`
+on mount.
+
+There is no last-viewed pin. GOAL-240 introduced `User.lastViewedThreadId` so a
+hard refresh re-opened the last thread; GOAL-345 reversed that and removed the
+property's readers and writers — including the stamp `createIngestThread` used
+to apply, which made every load after a background ingest land in an
+"Uploaded ….pdf" thread the member never opened.
 
 | Field       | Type     | Notes                                                                            |
 | ----------- | -------- | -------------------------------------------------------------------------------- |
 | id          | string   | UUID, UNIQUE                                                                     |
 | ownerId     | string   | Set only on the implicit reflective thread (MERGE key in `appendConversationTurn`). Not unique; concurrent first-writes can produce two implicit threads, which is acceptable degeneracy — both surface in the sidebar normally. |
 | createdAt   | datetime |                                                                                  |
-| lastTurnAt  | datetime | Indexed — drives the "active thread" selection                                   |
+| lastTurnAt  | datetime | Indexed — orders the thread switcher (newest first)                              |
 | turnCount   | int      | Atomic counter — incremented per append, source of `Turn.order`                  |
 | mode        | string   | `'default' \| 'aiden' \| 'braider'`. Locked to `'default'` on ingest threads.   |
 | kind        | string   | `'reflective' \| 'ingest'`. Drives the mode-selector lock in the switcher.       |

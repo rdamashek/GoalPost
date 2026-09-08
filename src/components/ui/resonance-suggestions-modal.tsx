@@ -202,8 +202,11 @@ export function ResonanceSuggestionsModal({
                 targetPulseId={currentSuggestion.targetPulseId}
                 targetPulseContent={currentSuggestion.targetPulseContent}
                 contextTitle={currentSuggestion.contextTitle}
-                onAccept={handleAccept}
-                onDecline={handleDecline}
+                // Undefined when the viewer lacks `canEditContent` — the item
+                // then renders read-only rather than showing controls the
+                // accept/decline routes would reject (kb/02-user-roles.md).
+                onAccept={onAccept ? handleAccept : undefined}
+                onDecline={onDecline ? handleDecline : undefined}
                 isLoading={actionLoading === currentSuggestion.id}
               />
 
@@ -342,8 +345,8 @@ export function ResonanceSuggestionsModal({
                       targetPulseId={suggestion.targetPulseId}
                       targetPulseContent={suggestion.targetPulseContent}
                       contextTitle={suggestion.contextTitle}
-                      onAccept={handleAccept}
-                      onDecline={handleDecline}
+                      onAccept={onAccept ? handleAccept : undefined}
+                      onDecline={onDecline ? handleDecline : undefined}
                       isLoading={actionLoading === suggestion.id}
                     />
                   ))}

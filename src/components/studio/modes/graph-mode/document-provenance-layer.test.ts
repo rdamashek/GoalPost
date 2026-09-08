@@ -19,6 +19,7 @@
  */
 import {
   buildDocumentProvenanceLayer,
+  documentDerivedIds,
   DOCUMENT_SIZE,
   type ProvenanceDocument,
 } from './document-provenance-layer'
@@ -381,5 +382,117 @@ describe('buildDocumentProvenanceLayer', () => {
       expect(a.nodes).toHaveLength(0)
       expect(b.nodes).toHaveLength(0)
     })
+  })
+})
+
+/**
+ * Switching the layer OFF has to take the whole document-derived subgraph with
+ * it, not just the Document hubs. Hiding the hubs alone was the original bug:
+ * an extracted person's only edge is EXTRACTED_FROM, so removing it left them
+ * floating — the precise failure the layer was built to remove.
+ *
+ * The two exemptions carry the real risk of over-removal, so they get the most
+ * coverage here: a curated roster person and a space owner/member must survive
+ * being named by a document, because they are on the canvas for reasons that
+ * have nothing to do with the upload.
+ */
+describe('documentDerivedIds', () => {
+  const docWithPulses = (
+    id: string,
+    personIds: string[],
+    pulseIds: string[]
+  ): ProvenanceDocument => ({
+    id,
+    extractedPeople: personIds.map((pid) => ({ id: pid })),
+    extractedPulses: pulseIds.map((puid) => ({ id: puid })),
+  })
+
+  it.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['an empty array', []],
+  ])('derives nothing from %s documents', (_label, documents) => {
+    expect([...documentDerivedIds({ documents })]).toEqual([])
+  })
+
+  it('collects the documents, the people they named and the pulses they made', () => {
+    const ids = documentDerivedIds({
+      documents: [docWithPulses('d1', ['p1', 'p2'], ['pulse1'])],
+    })
+    expect([...ids].sort()).toEqual(['d1', 'p1', 'p2', 'pulse1'])
+  })
+
+  it('collapses an entity named by several documents to one id', () => {
+    const ids = documentDerivedIds({
+      documents: [
+        docWithPulses('d1', ['shared'], ['shared-pulse']),
+        docWithPulses('d2', ['shared'], ['shared-pulse']),
+      ],
+    })
+    expect([...ids].sort()).toEqual(['d1', 'd2', 'shared', 'shared-pulse'])
+  })
+
+  it('keeps a curated roster person — curation outranks extraction', () => {
+    const ids = documentDerivedIds({
+      documents: [docWithPulses('d1', ['curated', 'extracted'], [])],
+      curatedPersonIds: ['curated'],
+    })
+    expect(ids.has('curated')).toBe(false)
+    expect(ids.has('extracted')).toBe(true)
+  })
+
+  it('keeps a structurally anchored person (space owner / member)', () => {
+    const ids = documentDerivedIds({
+      documents: [docWithPulses('d1', ['owner', 'extracted'], [])],
+      anchoredIds: new Set(['owner']),
+    })
+    expect(ids.has('owner')).toBe(false)
+    expect(ids.has('extracted')).toBe(true)
+  })
+
+  it('never exempts the Document itself, whatever the exemption lists say', () => {
+    const ids = documentDerivedIds({
+      documents: [docWithPulses('d1', [], [])],
+      curatedPersonIds: ['d1'],
+      anchoredIds: ['d1'],
+    })
+    expect(ids.has('d1')).toBe(true)
+  })
+
+  it('tolerates documents carrying no extracted entities at all', () => {
+    const ids = documentDerivedIds({ documents: [{ id: 'd1' }] })
+    expect([...ids]).toEqual(['d1'])
+  })
+
+  it('skips malformed entries rather than deriving an undefined id', () => {
+    const ids = documentDerivedIds({
+      documents: [
+        { id: '' } as ProvenanceDocument,
+        {
+          id: 'd1',
+          extractedPeople: [{ id: '' }, { id: 'p1' }],
+          extractedPulses: [{ id: '' }, { id: 'pulse1' }],
+        } as ProvenanceDocument,
+      ],
+    })
+    expect([...ids].sort()).toEqual(['d1', 'p1', 'pulse1'])
+  })
+
+  it('returns a fresh set per call, never a shared singleton', () => {
+    const a = documentDerivedIds({ documents: [] })
+    const b = documentDerivedIds({ documents: [] })
+    expect(a).not.toBe(b)
+  })
+
+  it('does not mutate the exemption collections it is handed', () => {
+    const anchoredIds = new Set(['owner'])
+    const curatedPersonIds = ['curated']
+    documentDerivedIds({
+      documents: [docWithPulses('d1', ['owner', 'curated', 'other'], [])],
+      curatedPersonIds,
+      anchoredIds,
+    })
+    expect([...anchoredIds]).toEqual(['owner'])
+    expect(curatedPersonIds).toEqual(['curated'])
   })
 })

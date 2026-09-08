@@ -17,6 +17,7 @@ import {
   BLOOM_NODE_TYPES,
   BLOOM_RELATIONSHIP_TYPES,
   DEFAULT_HIDDEN_TYPE_KEYS,
+  DOCUMENT_TYPE_KEY,
   applyBloomTypeFilters,
   nodeTypeKey,
   normalizeColor,
@@ -70,8 +71,13 @@ describe('registry integrity', () => {
     expect(new Set(keys).size).toBe(keys.length)
   })
 
-  it('defaults only Documents off (GOAL-346)', () => {
-    expect([...DEFAULT_HIDDEN_TYPE_KEYS]).toEqual(['document'])
+  it('opens with nothing hidden', () => {
+    // Documents were the one default-off row until GOAL-346 reversed it on
+    // `dev`: with the layer off, a person a document named has no other edge
+    // and the canvas opened full of edgeless dots. The mechanism stays (the
+    // volume argument that motivated it is still live) — the LIST is what has
+    // to stay empty, or the reversal is silently undone.
+    expect([...DEFAULT_HIDDEN_TYPE_KEYS]).toEqual([])
   })
 
   it('decodes the Document node colour in BOTH modes', () => {
@@ -179,7 +185,9 @@ describe('applyBloomTypeFilters', () => {
   it('hiding Documents takes its EXTRACTED_FROM edges with it, and nothing else', () => {
     const { nodes, relationships } = applyBloomTypeFilters(
       fieldCanvas(),
-      new Set(DEFAULT_HIDDEN_TYPE_KEYS)
+      // The Documents row, named directly: it is no longer a default, and
+      // this test is about the cascade, not about what ships switched off.
+      new Set([DOCUMENT_TYPE_KEY])
     )
     expect(nodes.map((n) => n.id)).toEqual(['goal-1', 'goal-2', 'person-1'])
     expect(relationships.map((r) => r.id)).toEqual([

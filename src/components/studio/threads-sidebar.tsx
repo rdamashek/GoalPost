@@ -1,6 +1,6 @@
 'use client'
 
-import { type FC, useEffect, useRef, useState, useCallback } from 'react'
+import { type FC, useEffect, useState, useCallback } from 'react'
 import { PanelLeftClose, PanelLeftOpen, Plus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -16,10 +16,8 @@ interface ThreadsSidebarProps {
   activeThreadId: string | null
   onSelectThread: (id: string, opts?: { isNew?: boolean }) => void
   /**
-   * Create a new thread. Resolves to the new threadId on success, or
-   * `null` if the create failed — the auto-create useEffect checks the
-   * return value so a transient POST failure doesn't strand the user
-   * on the placeholder.
+   * Create a new thread ("+" button). Resolves to the new threadId on
+   * success, or `null` if the create failed.
    */
   onNewThread: () => Promise<string | null>
 }
@@ -150,24 +148,12 @@ export const ThreadsSidebar: FC<ThreadsSidebarProps> = ({
     }
   }, [onNewThread, fetchThreads])
 
-  // First-time visitors should never stare at an empty "No conversations
-  // yet" sidebar — that reads as "the app didn't work". As soon as we
-  // confirm the user has zero threads, auto-create one so they have a
-  // tangible "New thread" row to type into. Guarded by a ref so a
-  // re-render after the create completes can't trigger a second create.
-  // On failure we reset the guard so the next render can retry — without
-  // this a transient network/auth failure would leave the placeholder
-  // pinned with no path forward.
-  const hasAutoCreatedRef = useRef(false)
-  useEffect(() => {
-    if (loading || creating) return
-    if (threads.length > 0) return
-    if (hasAutoCreatedRef.current) return
-    hasAutoCreatedRef.current = true
-    void handleNewThread().then((id) => {
-      if (!id) hasAutoCreatedRef.current = false
-    })
-  }, [loading, creating, threads.length, handleNewThread])
+  // GOAL-345: there is deliberately NO auto-create here. A member with zero
+  // threads used to have one minted on first load purely so this sidebar
+  // wasn't empty — which persisted a `New thread` node into the graph on a
+  // page load that never sent a message. The empty landing conversation is now
+  // the intended first-run state, so the placeholder row below stands in for it
+  // visually and the thread is created lazily on the member's first send.
 
   if (collapsed) {
     return (
@@ -256,9 +242,9 @@ export const ThreadsSidebar: FC<ThreadsSidebarProps> = ({
           </div>
         )}
 
-        {/* Auto-create is in flight (or about to run) — render a "New thread"
-            placeholder so the sidebar never shows an empty state. Real
-            row swaps in once the create + refetch complete (~300–600ms). */}
+        {/* The empty landing conversation (GOAL-345), or a member with no
+            threads at all. This row is purely visual — nothing is persisted
+            until the first send, at which point the real thread replaces it. */}
         {!loading && threads.length === 0 && (
           <div
             aria-current="true"
@@ -286,8 +272,8 @@ export const ThreadsSidebar: FC<ThreadsSidebarProps> = ({
               )}
             >
               <p className="text-xs leading-snug line-clamp-2 font-medium">
-                {/* `||` (not `??`) so an empty string snippet (auto-created
-                    thread, no turns yet) falls through to "New thread"
+                {/* `||` (not `??`) so an empty string snippet (a "+"-created
+                    thread with no turns yet) falls through to "New thread"
                     instead of rendering a blank row. */}
                 {t.title?.trim() || t.snippet?.trim() || 'New thread'}
               </p>

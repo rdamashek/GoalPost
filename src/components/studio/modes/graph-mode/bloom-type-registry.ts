@@ -290,17 +290,29 @@ export const BLOOM_RELATIONSHIP_TYPES: BloomTypeRow[] = [
   },
 ]
 
+/** The Documents row. Its hiding rule is id-based and lives in `bloom-view`. */
+export const DOCUMENT_TYPE_KEY = 'document'
+
 /**
  * Rows that are OFF the first time a viewer opens the canvas.
  *
- * Documents only (GOAL-346): a document-heavy field adds a node per upload on
- * top of the people it named, which buries the pulses the canvas is for. Every
- * other type starts visible — a filter that hides something on first paint,
- * without the viewer ever asking, reads as missing data rather than as a
- * filter. Hiding `document` cascades onto `extracted-from`, so the pair
- * defaults off together with one entry.
+ * Empty, deliberately. Documents shipped default-off to stop a document-heavy
+ * field burying its pulses, and GOAL-346 then reversed that: a person a
+ * document named has provenance as their ONLY tie to anything, so the canvas
+ * opened on a field of edgeless dots — 12 of the 14 people on one real field.
+ * The reversal is the current behaviour on `dev` and this list is what would
+ * quietly undo it.
+ *
+ * The default MECHANISM stays because the question is a live one — the volume
+ * argument was real, and `applyDocumentHiding` now sweeps the dots the old
+ * default produced, so default-off could be re-argued on its merits. Re-adding
+ * `DOCUMENT_TYPE_KEY` here is the whole change if it wins.
+ *
+ * The general rule stands either way: a filter that hides something on first
+ * paint, without the viewer ever asking, reads as missing data rather than as
+ * a filter.
  */
-export const DEFAULT_HIDDEN_TYPE_KEYS: readonly string[] = ['document']
+export const DEFAULT_HIDDEN_TYPE_KEYS: readonly string[] = []
 
 /** Strip whitespace + lowercase so rgba/hex compare regardless of formatting. */
 export const normalizeColor = (c: string | undefined): string =>

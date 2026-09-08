@@ -33,6 +33,13 @@ import { usePreferences } from '@/contexts/preferences-context'
 import type { FocalEntity } from '@/lib/focal-entity/types'
 import { routeHasCanvasScope } from './canvas-scope'
 import {
+  LANDING_THREAD_KEY,
+  mountedThreadIdFor,
+  resolveOutgoingThreadId,
+  shouldSkipHydration,
+} from './chat-thread-selection'
+import {
+  createConversationThread,
   fetchHydratedThread,
   type HydratedThread,
 } from '@/lib/simulation/conversation-thread-client'
@@ -114,15 +121,33 @@ const StudioBody: FC<{ children: ReactNode }> = ({ children }) => {
   // (see `consumeFreshThread`) so re-selecting it later — after it has
   // accumulated turns — hydrates normally.
   const [freshThreadId, setFreshThreadId] = useState<string | null>(null)
+  // GOAL-345: the chat runtime's remount key, and the thread it mounts against.
+  // It tracks *explicit* thread selection only — 'new' means the empty landing
+  // conversation every initial load starts on.
+  //
+  // This is deliberately separate from `selectedThreadId`, which is only what
+  // the sidebar/switcher highlights. When the landing conversation lazily
+  // creates its thread on the first send, the shell adopts that id for
+  // highlighting (`adoptLazyThread`) but must NOT re-key or re-prop the
+  // boundary: doing so would tear the runtime down mid-stream and lose the
+  // message the member just sent.
+  const [threadKey, setThreadKey] = useState(LANDING_THREAD_KEY)
   const selectThread = useCallback(
     (id: string | null, opts?: { isNew?: boolean }) => {
       if (id && opts?.isNew) setFreshThreadId(id)
       setSelectedThreadId(id)
+      setThreadKey(id ?? LANDING_THREAD_KEY)
     },
     []
   )
   const consumeFreshThread = useCallback((id: string) => {
     setFreshThreadId((current) => (current === id ? null : current))
+  }, [])
+  // The empty landing conversation created its thread on the first send. Adopt
+  // the id so the thread list highlights it, leaving `threadKey` untouched so
+  // the in-flight runtime survives — see the note above.
+  const adoptLazyThread = useCallback((id: string) => {
+    setSelectedThreadId((current) => current ?? id)
   }, [])
   // Both docked panels stay mounted at all times; fullscreen/closed states are
   // expressed by *collapsing* a panel rather than swapping the layout tree.
@@ -178,7 +203,10 @@ const StudioBody: FC<{ children: ReactNode }> = ({ children }) => {
   // sees it.
   useEffect(() => {
     return onOpenAssistantThread(({ threadId }) => {
-      if (threadId) setSelectedThreadId(threadId)
+      // `selectThread` (not a bare setter) so the runtime is re-keyed and the
+      // ingest thread actually hydrates — from the empty landing conversation
+      // the key would otherwise stay 'new' and the panel would show nothing.
+      if (threadId) selectThread(threadId)
       setCanvasOpen(true)
       // Whichever layout is active, the assistant has to actually become
       // visible: without this the docked panel stays collapsed at zero width
@@ -187,7 +215,13 @@ const StudioBody: FC<{ children: ReactNode }> = ({ children }) => {
       setChatOpen(true)
       if (effectiveLayout === 'floating') setFloatingChatOpen(true)
     })
-  }, [setCanvasOpen, setChatOpen, setFloatingChatOpen, effectiveLayout])
+  }, [
+    setCanvasOpen,
+    setChatOpen,
+    setFloatingChatOpen,
+    effectiveLayout,
+    selectThread,
+  ])
 
   // Keyboard shortcuts.
   //   C   → toggle canvas (docked only)
@@ -278,8 +312,13 @@ const StudioBody: FC<{ children: ReactNode }> = ({ children }) => {
   // the conversation. By wrapping ONLY the chat surface (not the whole body),
   // a thread switch remounts just the chat — the canvas stays put and the
   // loading state is scoped to the chat panel instead of the whole screen.
-  const threadKey = selectedThreadId ?? 'active'
-  const skipHydration = !!selectedThreadId && selectedThreadId === freshThreadId
+  //
+  // GOAL-345: every initial load lands on an empty conversation. `threadKey`
+  // starts at 'new', so there is no thread to mount against and nothing is
+  // replayed — the member's previous threads stay one tap away in the switcher
+  // rather than being restored on top of them.
+  const mountedThreadId = mountedThreadIdFor(threadKey)
+  const skipHydration = shouldSkipHydration(mountedThreadId, freshThreadId)
 
   const chatNode = (
     // `inert` while hidden: a collapsed Panel is only zero-width with
@@ -289,9 +328,10 @@ const StudioBody: FC<{ children: ReactNode }> = ({ children }) => {
     <div className="relative h-full w-full" inert={!chatOpen}>
       <AssistantRuntimeBoundary
         key={threadKey}
-        threadId={selectedThreadId ?? undefined}
+        threadId={mountedThreadId}
         skipHydration={skipHydration}
         onConsumeFresh={consumeFreshThread}
+        onThreadCreated={adoptLazyThread}
       >
         <ChatHost
           fullscreen={fullscreenSide === 'chat'}
@@ -414,9 +454,10 @@ const StudioBody: FC<{ children: ReactNode }> = ({ children }) => {
                 spinner never covers the canvas. */}
             <AssistantRuntimeBoundary
               key={threadKey}
-              threadId={selectedThreadId ?? undefined}
+              threadId={mountedThreadId}
               skipHydration={skipHydration}
               onConsumeFresh={consumeFreshThread}
+              onThreadCreated={adoptLazyThread}
               showLoadingOverlay={floatingChatOpen && isMobile}
             >
               <FloatingChatPanel
@@ -439,6 +480,10 @@ const StudioBody: FC<{ children: ReactNode }> = ({ children }) => {
  * Mounts the AI runtime for the chat surface. Fetches the persisted
  * conversation thread first so messages hydrate before the runtime is
  * created (`useChatRuntime` reads `messages` only at init).
+ *
+ * With no `threadId` this is the empty landing conversation every initial load
+ * opens on (GOAL-345). Nothing is fetched, and the thread is created lazily on
+ * the first send — see `resolveBody`.
  */
 const AssistantRuntimeBoundary: FC<{
   children: ReactNode
@@ -456,6 +501,13 @@ const AssistantRuntimeBoundary: FC<{
    */
   onConsumeFresh?: (threadId: string) => void
   /**
+   * Called with the id of the thread lazily created for the empty landing
+   * conversation's first send, so the parent can highlight it in the thread
+   * list. The parent must not re-key this boundary in response — that would
+   * tear down the runtime mid-stream.
+   */
+  onThreadCreated?: (threadId: string) => void
+  /**
    * Render the loading state as an absolute overlay that fills the nearest
    * positioned ancestor. True for the docked chat panel (the overlay is
    * scoped to the panel); false for the floating panel, where the chat is
@@ -468,6 +520,7 @@ const AssistantRuntimeBoundary: FC<{
   threadId,
   skipHydration = false,
   onConsumeFresh,
+  onThreadCreated,
   showLoadingOverlay = true,
 }) => {
   const { aiMode } = usePreferences()
@@ -518,12 +571,43 @@ const AssistantRuntimeBoundary: FC<{
   // writes; read-and-cleared by the runtime's onFinish to decide whether to
   // refetch the canvas (so newly created entities surface on the right).
   const turnHadWriteRef = useRef(false)
+  // GOAL-345: the thread this runtime lazily created for the empty landing
+  // conversation. Survives every send within the mount so turn 2 onwards land
+  // in the same thread as turn 1.
+  const lazyThreadIdRef = useRef<string | null>(null)
 
-  const resolveBody = useCallback(() => {
+  // Async by design: the transport awaits `body` (AI SDK `Resolvable`), which
+  // is what lets the empty landing conversation create its thread immediately
+  // before dispatch rather than on page load.
+  const resolveBody = useCallback(async () => {
     const snapshot = sessionContextRef.current
     const focalEntity = snapshot.focalEntity
     const previousFocalEntity = lastSentFocalRef.current
     lastSentFocalRef.current = focalEntity
+
+    // The landing conversation has no thread yet. Create one now so the turn
+    // carries an explicit id: `appendConversationTurn` with no threadId MERGEs
+    // onto the member's implicit ownerId-keyed thread, which would silently
+    // bury this message in their oldest conversation's history while the panel
+    // shows only the message they just typed.
+    //
+    // If creation fails (offline, expired session) we fall through with no id
+    // rather than dropping the member's message — the request itself is very
+    // likely to fail too, and the legacy implicit-thread path is the safer of
+    // two bad outcomes.
+    let { threadId: outgoingThreadId } = resolveOutgoingThreadId({
+      mountedThreadId: threadId,
+      lazyThreadId: lazyThreadIdRef.current,
+    })
+    if (!outgoingThreadId) {
+      const created = await createConversationThread()
+      if (created) {
+        lazyThreadIdRef.current = created
+        outgoingThreadId = created
+        onThreadCreated?.(created)
+      }
+    }
+
     return {
       aiMode,
       currentUserId: snapshot.currentUserId,
@@ -540,7 +624,7 @@ const AssistantRuntimeBoundary: FC<{
         fieldContextTitle: snapshot.activeFieldContextTitle,
         spaceOwnedByCurrentUser: snapshot.activeSpaceOwnedByCurrentUser,
       },
-      threadId,
+      threadId: outgoingThreadId,
       focalEntity: focalEntity
         ? {
             type: focalEntity.type,
@@ -582,7 +666,7 @@ const AssistantRuntimeBoundary: FC<{
         return actions
       })(),
     }
-  }, [aiMode, threadId])
+  }, [aiMode, threadId, onThreadCreated])
 
   // Capture `skipHydration` at mount. The boundary is keyed by thread, so every
   // thread gets a fresh mount with the right value; reading it from a ref keeps
@@ -594,14 +678,16 @@ const AssistantRuntimeBoundary: FC<{
   >(skipHydration ? { status: 'ready', thread: null } : { status: 'loading' })
 
   useEffect(() => {
-    if (skipHydrationRef.current) {
-      // Empty new thread — nothing to fetch. Let the parent forget it's fresh
-      // so a later re-selection (once it has turns) hydrates normally.
+    if (skipHydrationRef.current || !threadId) {
+      // Empty conversation — nothing to fetch. Either a thread we just created
+      // (let the parent forget it's fresh, so a later re-selection once it has
+      // turns hydrates normally) or the landing state, which has no thread at
+      // all until the first send creates one.
       if (threadId) onConsumeFresh?.(threadId)
       return
     }
     const controller = new AbortController()
-    fetchHydratedThread(controller.signal, threadId).then((thread) => {
+    fetchHydratedThread(threadId, controller.signal).then((thread) => {
       if (controller.signal.aborted) return
       setHydration({ status: 'ready', thread })
     })
@@ -638,7 +724,7 @@ const AssistantRuntimeBoundary: FC<{
 
 interface AssistantRuntimeInnerProps {
   initialMessages: UIMessage[]
-  resolveBody: () => Record<string, unknown>
+  resolveBody: () => Promise<Record<string, unknown>>
   pendingActionRef: MutableRefObject<ApprovalAction[] | null>
   turnHadWriteRef: MutableRefObject<boolean>
   children: ReactNode

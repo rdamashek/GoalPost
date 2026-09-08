@@ -28,6 +28,12 @@ export interface ProvenanceDocument {
   id: string
   filename?: string | null
   extractedPeople?: { id: string }[] | null
+  /**
+   * The pulses ingestion minted from this document. Only ids are read here;
+   * the query already selects them for the field page's document list, so
+   * this costs no extra round-trip.
+   */
+  extractedPulses?: { id: string }[] | null
 }
 
 export interface DocumentProvenanceLayer {
@@ -45,8 +51,15 @@ export interface DocumentProvenanceLayer {
  */
 const empty = (): DocumentProvenanceLayer => ({ nodes: [], relationships: [] })
 
-/** Matches PERSON_SIZE's scale in bloom-view; documents read as peers of people. */
-export const DOCUMENT_SIZE = 18
+/**
+ * In scale with PERSON_SIZE (30) and PULSE_SIZE (32) in bloom-view. It was 18
+ * — small enough that NVL had nowhere to paint the caption, so every document
+ * rendered as an anonymous grey dot while every other node carried its label.
+ * A provenance hub whose whole job is to say WHICH document a person came from
+ * has to show its filename. Slightly under a person, because a document is
+ * the source of the cluster, not a peer in it.
+ */
+export const DOCUMENT_SIZE = 28
 
 /**
  * Build the layer.
@@ -107,4 +120,81 @@ export function buildDocumentProvenanceLayer(params: {
   }
 
   return { nodes, relationships }
+}
+
+/**
+ * Every id on the canvas that exists only because a document put it there —
+ * the documents themselves, the people they named, and the pulses ingestion
+ * minted from them.
+ *
+ * Switching the Documents layer OFF used to hide the Document nodes and their
+ * EXTRACTED_FROM edges and nothing else, which left the extracted people
+ * behind as edgeless dots and the extracted pulses behind as a cloud with no
+ * visible source: provenance is the only tie most of them have. That is the
+ * "independent hanging nodes" problem, and it is why "off" has to mean the
+ * whole document-derived subgraph, not just its hub. This function names that
+ * subgraph; `applyDocumentHiding` (document-visibility.ts) takes it off the
+ * canvas and sweeps up anything the removal strands, including entities the
+ * two exemptions below deliberately spare.
+ *
+ * Two escape hatches keep the rule from eating things that merely *touch* a
+ * document. Both spare a node from counting as document CONTENT; NEITHER
+ * spares it from the sweep. An exempt person who is left with no edges at all
+ * once the documents go is still removed — being spared here buys them the
+ * chance to stand on their own edges, not a seat on an empty canvas.
+ *
+ *   - `curatedPersonIds` — a person a human deliberately promoted onto the
+ *     field roster. Curation wins over extraction here for the same reason it
+ *     wins in `partitionFieldRoster` (src/lib/field-roster-visibility.ts):
+ *     `update_person` stamps EXTRACTED_FROM onto people who ALREADY existed,
+ *     so extraction alone does not mean "arrived via a document".
+ *   - `anchoredIds` — nodes with a structural reason to be on canvas
+ *     regardless of any document. In practice the parent space's owner and
+ *     members: they are rendered because they belong to the space, and a
+ *     document happening to name them must not evict them — that would strip
+ *     the author edge off every pulse they wrote by hand, which is a real
+ *     loss where their own disappearance, once nothing is left attached to
+ *     them, is not.
+ *
+ * Pulses have no curated flag, so a hand-written pulse that a later ingest
+ * run enriched (`update_pulse` with a documentId appends EXTRACTED_FROM the
+ * same way) counts as document-derived here. That is the intended reading for
+ * the case this actually fires on — the GOAL-344 article import, where the
+ * document IS the article the pulse came from — and it is recoverable in one
+ * click, unlike a hanging node, which the user cannot resolve at all.
+ *
+ * Returns a fresh Set per call; see the note on `empty()` above for why
+ * nothing here is a shared module-level singleton.
+ */
+export function documentDerivedIds(params: {
+  documents: readonly ProvenanceDocument[] | null | undefined
+  curatedPersonIds?: readonly string[] | null
+  anchoredIds?: Iterable<string> | null
+}): Set<string> {
+  const { documents, curatedPersonIds, anchoredIds } = params
+  const derived = new Set<string>()
+  if (!documents || documents.length === 0) return derived
+
+  // Two lists, not one merged set: curation is a fact about a PERSON's place
+  // on the roster and must not exempt a pulse that happens to share the id
+  // space, while `anchoredIds` is deliberately type-agnostic. Neither can
+  // exempt the Document itself — it is the thing being switched off.
+  const anchored = new Set<string>(anchoredIds ?? [])
+  const curated = new Set<string>(curatedPersonIds ?? [])
+
+  for (const doc of documents) {
+    if (!doc?.id) continue
+    derived.add(doc.id)
+    for (const person of doc.extractedPeople ?? []) {
+      if (!person?.id) continue
+      if (anchored.has(person.id) || curated.has(person.id)) continue
+      derived.add(person.id)
+    }
+    for (const pulse of doc.extractedPulses ?? []) {
+      if (!pulse?.id) continue
+      if (anchored.has(pulse.id)) continue
+      derived.add(pulse.id)
+    }
+  }
+  return derived
 }
