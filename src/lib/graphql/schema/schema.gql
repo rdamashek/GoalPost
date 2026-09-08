@@ -1804,7 +1804,30 @@ type ResourcePulse implements FieldPulse
   why: String
   location: String
   time: String
-  
+
+  """
+  GOAL-355 — where this resource was *found*, as distinct from `location`,
+  which is the resource itself. Written by the bulk article import from the
+  sheet's `source_url` column (WF-11). Nullable and additive: every pulse
+  created before GOAL-355, and every row whose sheet omits the column, simply
+  has no value here.
+
+  It is a property of its own rather than part of `content` precisely so the
+  **doc-ingest pass** that may replace a placeholder body with an AI-generated
+  summary can never overwrite it — the failure members hit when they carried
+  the source link in the description column. That guarantee is specifically
+  against the ingest path (which only ever writes `content`) and against a
+  re-import (`create_pulse`'s enrich branch fills the gap with `coalesce`, so
+  an existing value stands). It is deliberately NOT write-once: a Space owner /
+  ADMIN / MEMBER can still correct it through the generated update mutation,
+  exactly as they can `location`.
+
+  Read access is the parent ResourcePulse's, i.e. the FieldContext's Space:
+  a member who can see the pulse can see where it came from. Note the link may
+  itself carry a share token, exactly as `location` already can.
+  """
+  sourceUrl: String
+
   createdBy: [Person!]! @relationship(type: "CREATED_BY", direction: OUT)
   initiatedBy: [Person!]! @relationship(type: "INITIATED_BY", direction: OUT)
   context: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)

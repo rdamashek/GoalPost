@@ -61,6 +61,21 @@ const articleRowSchema = z.object({
     .trim()
     .max(ARTICLE_FIELD_LIMITS.description)
     .optional(),
+  // GOAL-355 — optional by construction: a sheet in the pre-GOAL-355 format
+  // submits neither key and validates exactly as it did before.
+  // No `.min(1)`: an empty string is tolerated here exactly as `description`
+  // tolerates one, so a client sending `resourceType: ''` cannot 400 the whole
+  // batch over a cell the preview would simply have treated as absent.
+  resourceType: z
+    .string()
+    .trim()
+    .max(ARTICLE_FIELD_LIMITS.resourceType)
+    .optional(),
+  sourceUrl: z
+    .string()
+    .trim()
+    .max(ARTICLE_FIELD_LIMITS.sourceUrl)
+    .optional(),
 })
 
 const articleImportSchema = z.object({

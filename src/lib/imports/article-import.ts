@@ -37,6 +37,8 @@ export const ARTICLE_FIELD_LIMITS = {
   date: 100,
   url: 2000,
   description: 5000,
+  resourceType: 100,
+  sourceUrl: 2000,
 } as const
 
 export type ArticlePulseType = 'GoalPulse' | 'ResourcePulse' | 'StoryPulse'
@@ -51,6 +53,20 @@ export interface ArticleImportRowInput {
   url: string
   pulseType: ArticlePulseType
   description?: string
+  /**
+   * GOAL-355 — the sheet's `resource_type` column, normalized. Populates
+   * `ResourcePulse.resourceType` directly instead of being suffixed onto the
+   * title as free text. Absent when the column is missing or blank, which
+   * leaves the pre-GOAL-355 `'article'` default in place.
+   */
+  resourceType?: string
+  /**
+   * GOAL-355 — the sheet's `source_url` column. Where the member found the
+   * resource (a LinkedIn post, a newsletter), as distinct from `url`, which is
+   * the resource itself. Stored on its own pulse property so the AI-generated
+   * summary that may replace a placeholder `content` can never eat it.
+   */
+  sourceUrl?: string
 }
 
 export interface ArticleRowError {
@@ -332,6 +348,8 @@ type ArticleColumnKey =
   | 'authorEmail'
   | 'pulseType'
   | 'description'
+  | 'resourceType'
+  | 'sourceUrl'
 
 interface ArticleHeaderRule {
   key: ArticleColumnKey
@@ -356,7 +374,13 @@ export const ARTICLE_TEMPLATE_HEADERS: ArticleHeaderRule[] = [
   {
     key: 'date',
     label: 'Date',
-    aliases: ['date', 'published', 'published_date', 'publication_date', 'pub_date'],
+    aliases: [
+      'date',
+      'published',
+      'published_date',
+      'publication_date',
+      'pub_date',
+    ],
     required: true,
   },
   {
@@ -383,6 +407,26 @@ export const ARTICLE_TEMPLATE_HEADERS: ArticleHeaderRule[] = [
     aliases: ['description', 'content', 'summary', 'notes'],
     required: false,
   },
+  // GOAL-355 — deliberately narrow aliases. `pulse_type` already owns the bare
+  // "type" header, and `url` owns "link", so anything looser here would make a
+  // sheet's meaning depend on which rule matched first.
+  {
+    key: 'resourceType',
+    label: 'Resource type',
+    aliases: ['resource_type', 'resourcetype'],
+    required: false,
+  },
+  {
+    key: 'sourceUrl',
+    label: 'Source URL',
+    // NOT `source_link` or a bare `source`: a present-but-unparseable value
+    // here fails the row, so every alias added is a header a pre-GOAL-355 sheet
+    // could already be using for hand-kept prose ("LinkedIn", "Amara sent it")
+    // that would newly stop importing. `source_url` / `sourceUrl` are explicit
+    // enough to read as opting in to this column.
+    aliases: ['source_url', 'sourceurl'],
+    required: false,
+  },
 ]
 
 /** Single source for the alias lists `parseArticleRows` reads columns with. */
@@ -399,6 +443,8 @@ export const ARTICLE_TEMPLATE_COLUMNS = [
   'author_email',
   'pulse_type',
   'description',
+  'resource_type',
+  'source_url',
 ]
 
 export const ARTICLE_TEMPLATE_SAMPLE_ROW = [
@@ -409,6 +455,8 @@ export const ARTICLE_TEMPLATE_SAMPLE_ROW = [
   '',
   'resource',
   'How neighbourhood mutual aid groups organised recovery support.',
+  'article',
+  'https://www.linkedin.com/posts/example-share',
 ]
 
 const PULSE_TYPE_BY_KEYWORD: Record<string, ArticlePulseType> = {
@@ -523,9 +571,38 @@ export function normalizeArticleDate(raw: string): string {
  * with a clear message instead of silently mistyping the pulse.
  */
 export function resolveArticlePulseType(raw?: string): ArticlePulseType | null {
-  const normalized = (raw ?? '').trim().toLowerCase().replace(/[\s_-]*pulse$/, '')
+  const normalized = (raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]*pulse$/, '')
   if (!normalized) return 'ResourcePulse'
   return PULSE_TYPE_BY_KEYWORD[normalized] ?? null
+}
+
+/**
+ * GOAL-355 — the default `resourceType` for a `ResourcePulse` row whose sheet
+ * gave no `resource_type`. Unchanged from the pre-GOAL-355 hardcoded value, so
+ * a sheet in the old format produces byte-identical pulses.
+ */
+export const DEFAULT_ARTICLE_RESOURCE_TYPE = 'article'
+
+/**
+ * Normalize a `resource_type` cell to the stored `resourceType` token.
+ *
+ * Lower-cased and internally whitespace-collapsed, deliberately: the whole
+ * point of the column is that the type stops being unstructured title text and
+ * becomes filterable, and "Book" / "book" / "BOOK " grouping into three buckets
+ * would give back exactly the problem it replaces. Lowercase is also what every
+ * existing writer of this property already stores ('article', 'general').
+ *
+ * The value set is intentionally NOT an enum: `ResourcePulse.resourceType` is
+ * `String!` in the SDL and GOAL-354 keeps it extensible, so a member's own
+ * vocabulary ("ontology", "zine") imports rather than failing the row. Returns
+ * undefined for a blank cell so the caller can apply its own default.
+ */
+export function normalizeArticleResourceType(raw?: string): string | undefined {
+  const collapsed = (raw ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
+  return collapsed || undefined
 }
 
 /** Shared client/server email shape — the zod schema reuses this exact
@@ -604,7 +681,11 @@ export function parseArticleRows(sheetRows: Record<string, string>[]): {
     const pulseType = resolveArticlePulseType(rawType)
     if (!pulseType) {
       problems.push(
-        `"${rawType}" is not a supported pulse type — use goal, resource, or story (blank defaults to resource).`
+        // GOAL-355 names resource_type here on purpose: now that resource kinds
+        // are a first-class column, "book"/"podcast" under a bare `Type` header
+        // lands on pulse_type and fails, and the old message gave no hint that
+        // the value belonged in a different column.
+        `"${rawType}" is not a supported pulse type — use goal, resource, or story (blank defaults to resource). If you meant the kind of resource (book, podcast, article), use the resource_type column instead.`
       )
     }
 
@@ -622,6 +703,51 @@ export function parseArticleRows(sheetRows: Record<string, string>[]): {
       problems.push(
         `Description is longer than ${ARTICLE_FIELD_LIMITS.description} characters.`
       )
+    }
+
+    // GOAL-355 — both new columns are optional, so a blank cell (or a sheet
+    // that has neither column at all) is never an error. Only a value that is
+    // present and unusable fails the row, and it fails in the preview, where
+    // the member can fix the cell before anything is written.
+    const rawResourceType = getRowValue(sheetRow, COLUMN_ALIASES.resourceType)
+    const resourceType = normalizeArticleResourceType(rawResourceType)
+    if (
+      resourceType &&
+      resourceType.length > ARTICLE_FIELD_LIMITS.resourceType
+    ) {
+      problems.push(
+        `Resource type is longer than ${ARTICLE_FIELD_LIMITS.resourceType} characters.`
+      )
+    }
+
+    const rawSourceUrl = getRowValue(sheetRow, COLUMN_ALIASES.sourceUrl)
+    const sourceUrl = rawSourceUrl
+      ? normalizeArticleUrl(rawSourceUrl)
+      : undefined
+    if (rawSourceUrl && !sourceUrl) {
+      problems.push(`"${rawSourceUrl}" is not a valid http(s) source URL.`)
+    } else if (sourceUrl && sourceUrl.length > ARTICLE_FIELD_LIMITS.sourceUrl) {
+      problems.push(
+        `Source URL is longer than ${ARTICLE_FIELD_LIMITS.sourceUrl} characters.`
+      )
+    }
+
+    // Only ResourcePulse declares `resourceType` / `sourceUrl`, so on a goal or
+    // story row these two cells have nowhere to land. Say so instead of
+    // importing the row and dropping them: a source URL that vanishes without
+    // a word is the precise failure this ticket exists to remove, and doing it
+    // in the preview costs the member one edit rather than a silent gap they
+    // find later.
+    if (pulseType && pulseType !== 'ResourcePulse') {
+      const stranded = [
+        rawResourceType ? 'resource_type' : '',
+        rawSourceUrl ? 'source_url' : '',
+      ].filter(Boolean)
+      if (stranded.length > 0) {
+        problems.push(
+          `${stranded.join(' and ')} only appl${stranded.length === 1 ? 'ies' : 'y'} to resource rows — set pulse_type to resource, or clear ${stranded.length === 1 ? 'that column' : 'those columns'}.`
+        )
+      }
     }
 
     if (problems.length > 0) {
@@ -642,6 +768,8 @@ export function parseArticleRows(sheetRows: Record<string, string>[]): {
       url: url as string,
       pulseType: pulseType as ArticlePulseType,
       description,
+      resourceType,
+      sourceUrl: sourceUrl ?? undefined,
     })
   })
 
