@@ -99,8 +99,10 @@ export function ResonanceSuggestionItem({
         {description}
       </p>
 
-      {/* Pulse Excerpts */}
-      <div className="mb-4 space-y-2">
+      {/* Pulse Excerpts — stacked on phones, side by side once the dialog
+          widens (GOAL-353), which is where the extra horizontal space actually
+          buys back vertical scrolling instead of just lengthening lines. */}
+      <div className="mb-4 grid grid-cols-1 gap-2 lg:grid-cols-2">
         <div className="rounded bg-slate-50/50 p-3 dark:bg-slate-800/50">
           <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">
             Pulse 1
