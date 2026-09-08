@@ -39,13 +39,17 @@ export function useResonanceSuggestionCount({
   // current field's.
   const requestIdRef = useRef(0)
 
-  const fetchCount = useCallback(async () => {
+  // Resolves to the number it just fetched (0 on any failure, matching what it
+  // renders). Callers that need to hand the fresh number straight on — the
+  // field-context page broadcasting it to the studio action bar — can't read it
+  // off `count`, which is still the pre-fetch value in their closure.
+  const fetchCount = useCallback(async (): Promise<number> => {
     const requestId = ++requestIdRef.current
     const isStale = () => requestId !== requestIdRef.current
 
     if (!spaceId) {
       setCount(0)
-      return
+      return 0
     }
 
     setLoading(true)
@@ -56,20 +60,23 @@ export function useResonanceSuggestionCount({
       const response = await fetch(
         `/api/resonance/suggestions/count?${params.toString()}`
       )
-      if (isStale()) return
+      if (isStale()) return 0
       if (!response.ok) {
         // 403 is expected for a caller with no role on the Space — render as
         // "nothing to review" rather than an error.
         setCount(0)
-        return
+        return 0
       }
 
       const data: SuggestionCountResponse = await response.json()
-      if (isStale()) return
-      setCount(Number(data?.count ?? 0) || 0)
+      if (isStale()) return 0
+      const next = Number(data?.count ?? 0) || 0
+      setCount(next)
+      return next
     } catch (err) {
       console.error('[useResonanceSuggestionCount] Error:', err)
       if (!isStale()) setCount(0)
+      return 0
     } finally {
       if (!isStale()) setLoading(false)
     }

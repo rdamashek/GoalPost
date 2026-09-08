@@ -89,6 +89,10 @@ import {
   onOpenAddPulseModal,
   onOpenImportArticlesModal,
 } from '@/lib/simulation/pulse-creation-events'
+import {
+  emitResonanceSuggestionsChanged,
+  onOpenResonanceSuggestions,
+} from '@/lib/simulation/resonance-review-events'
 import { deriveCanEditContent } from '@/hooks/use-field-context-permissions'
 import { useRouteFocalScope } from '@/lib/focal-entity/use-route-focal-scope'
 import { useResonanceDiscovery } from '@/hooks/useResonanceDiscovery'
@@ -320,14 +324,35 @@ export default function FieldContextDetailsPage() {
     void refetchSuggestions()
   }, [refetchSuggestions])
 
+  // The studio-shell action bar fires this event from its own review entry,
+  // which is the only way into the queue while the canvas is showing Bloom
+  // Exploration (this page is mounted but hidden there). Same stale-listener
+  // guard as the add-pulse subscription above.
+  useEffect(() => {
+    if (!contextId) return
+    return onOpenResonanceSuggestions((detail) => {
+      if (detail.fieldContextId !== contextId) return
+      openSuggestionsModal()
+    })
+  }, [contextId, openSuggestionsModal])
+
   const { triggerDiscovery, isLoading: isDiscoveringResonances } =
     useResonanceDiscovery({
       spaceId,
       onSuccess: () => {
         setIsDiscoverModalOpen(true)
         void refetchSuggestions()
-        // A sweep mints new `pending` suggestions — keep the badge honest.
-        void refetchPendingSuggestionCount()
+        // A sweep mints new `pending` suggestions — keep the badge honest, and
+        // hand the fresh number to the action bar's copy of it rather than
+        // making it fetch the same count again.
+        void refetchPendingSuggestionCount().then((pendingCount) => {
+          if (!contextId || !spaceId) return
+          emitResonanceSuggestionsChanged({
+            fieldContextId: contextId,
+            spaceId,
+            pendingCount,
+          })
+        })
       },
     })
 
@@ -1890,7 +1915,16 @@ export default function FieldContextDetailsPage() {
           // (and the list refetch it rides along with) per reviewed card.
           onRefresh={async () => {
             await refetchSuggestions()
-            await refetchPendingSuggestionCount()
+            const pendingCount = await refetchPendingSuggestionCount()
+            // The action bar holds its own count (it renders above this page
+            // and stays visible in Bloom). Send the number, not just the news:
+            // this fires after EVERY accept / decline, so a refetch on its side
+            // would double the count queries per reviewed card.
+            emitResonanceSuggestionsChanged({
+              fieldContextId: contextId,
+              spaceId,
+              pendingCount,
+            })
           }}
         />
       ) : null}
