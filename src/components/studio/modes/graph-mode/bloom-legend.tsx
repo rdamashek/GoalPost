@@ -5,266 +5,78 @@ import type { Node, Relationship } from '@neo4j-nvl/base'
 import { cn } from '@/lib/utils'
 import { useIsDarkMode } from '@/hooks'
 import {
-  BLOOM_PALETTE_DARK as DARK,
-  BLOOM_PALETTE_LIGHT as LIGHT,
-} from './bloom-palette'
-import {
-  NODE_STYLE,
-  UNKNOWN_NODE_STYLE,
-  lightColorFor,
-} from '@/lib/cypher-generator/node-style'
+  normalizeColor,
+  presentNodeRows,
+  presentRelationshipRows,
+  type BloomTypeRow,
+} from './bloom-type-registry'
+import type { BloomTypeFilters } from './use-bloom-type-filters'
 
 /**
- * Scope-aware legend for the Bloom canvas.
+ * Scope-aware legend for the Bloom canvas — and, since GOAL-350, the canvas's
+ * type filter.
  *
- * Bloom paints native NVL nodes as bare colored circles (caption + color +
- * size only — see bloom-view.tsx), so the color is the *only* thing that
+ * Bloom paints native NVL nodes as bare coloured circles (caption + colour +
+ * size only — see bloom-view.tsx), so the colour is the *only* thing that
  * tells a Goal apart from a Person. Per the "no type tags on Bloom captions"
- * convention this legend is where those colors get decoded — out of the way
+ * convention this legend is where those colours get decoded — out of the way
  * in a collapsible chip rather than baked into every node label.
  *
  * It derives its rows from the exact `nodes` / `relationships` arrays the
- * canvas is rendering: a swatch shows only when a node/edge of that color is
- * actually on screen. That makes it scope-aware for free — the root view
+ * canvas is rendering, so a swatch shows only when a node/edge of that colour
+ * is actually on screen. That makes it scope-aware for free — the root view
  * shows MeSpace/WeSpace/Person, a field view shows the pulse subtypes +
  * resonance edges, etc. — and keeps it permanently in sync with the paint.
  *
- * The native node/edge colors are imported straight from `bloom-palette.ts`,
- * and the *overlay* palette — the colors a chat "custom view" pushes — is
- * imported from the cypher generator's shared `node-style.ts`, so a swatch can
- * never drift out of sync with either paint source (GOAL-288: the overlay
- * colors used to be hand-mirrored literals here, and PromiseWeave's fuchsia
- * was missing — assistant-rendered weaves showed no legend row). The
- * surrounding chrome (glass, text) uses gp-* tokens so the panel itself themes
- * correctly in light + dark.
+ * GOAL-350 turns each of those rows into a switch. Because the rows were
+ * already computed from the live canvas, the toggle list is too: a node or
+ * edge type added later shows up as a control with no work here, and each
+ * scope offers exactly the types it renders. The descriptor tables and the
+ * filter transform they drive live in `bloom-type-registry.ts`; this file is
+ * only the control surface.
  *
- * Both paint sources now have a light and a dark variant (NVL can't consume
- * CSS variables, so the canvas carries its own palettes). A row therefore
- * lists BOTH variants in `colors` — the canvas hands us whichever it painted —
- * while `swatch` picks the variant matching the mode the legend itself is
- * rendering in.
+ * Rows are derived from the UNFILTERED canvas (`bloom-view` passes what it
+ * built, not what it painted), so a type you switch off keeps its row — and
+ * its way back on — instead of vanishing along with its nodes.
  */
-
-type LegendItem = {
-  label: string
-  /** Solid, AA-visible swatch shown in the row, one per mode. */
-  swatch: { dark: string; light: string }
-  /** Rendered node/edge colors that should surface this row when present. */
-  colors: string[]
-}
-
-/**
- * An overlay color and its light-mode repaint — the canvas may hand the legend
- * either, depending on the mode it painted in.
- */
-const ov = (color: string): string[] => [color, lightColorFor(color)]
-
-// Overlay palette — imported from the same module the executor styles its
-// nodes with, so every color the overlay can push is decodable here. Each
-// entry expands to the dark color the executor emits plus the light color the
-// canvas repaints it as.
-const OVERLAY_SPACE = ov(NODE_STYLE.MeSpace.color) // Me/We/Space share one color
-const OVERLAY_FIELD = ov(NODE_STYLE.FieldContext.color)
-const OVERLAY_PULSE = [
-  NODE_STYLE.GoalPulse.color,
-  NODE_STYLE.ResourcePulse.color,
-  NODE_STYLE.StoryPulse.color,
-  NODE_STYLE.CarePulse.color,
-  NODE_STYLE.CoreValuePulse.color,
-  NODE_STYLE.FieldPulse.color,
-].flatMap(ov)
-const OVERLAY_RESONANCE = [
-  NODE_STYLE.ResonanceLink.color,
-  NODE_STYLE.FieldResonance.color,
-].flatMap(ov)
-
-// Node rows. Native scopes (root / space / field) carry fine-grained subtype
-// colors imported from bloom-view; the generic `Pulse` and `Resonance` rows
-// only ever match the coarser overlay palette, so they never double up with
-// the subtype rows above (the two palettes are disjoint apart from Person,
-// whose native and overlay pinks are deliberately identical).
-// Exported for the drift test only — every NODE_STYLE color must be
-// decodable by some row here (bloom-legend.test.tsx).
-export const LEGEND_NODES: LegendItem[] = [
-  {
-    label: 'Your MeSpace',
-    swatch: { dark: DARK.space.MeSpace, light: LIGHT.space.MeSpace },
-    colors: [DARK.space.MeSpace, LIGHT.space.MeSpace],
-  },
-  {
-    label: 'WeSpace',
-    swatch: { dark: DARK.space.WeSpace, light: LIGHT.space.WeSpace },
-    colors: [DARK.space.WeSpace, LIGHT.space.WeSpace, ...OVERLAY_SPACE],
-  },
-  {
-    label: 'Field context',
-    swatch: { dark: DARK.field.MeSpace, light: LIGHT.field.MeSpace },
-    colors: [
-      DARK.field.MeSpace,
-      DARK.field.WeSpace,
-      LIGHT.field.MeSpace,
-      LIGHT.field.WeSpace,
-      ...OVERLAY_FIELD,
-    ],
-  },
-  {
-    label: 'Goal',
-    swatch: { dark: DARK.pulse.goal, light: LIGHT.pulse.goal },
-    colors: [DARK.pulse.goal, LIGHT.pulse.goal],
-  },
-  {
-    label: 'Resource',
-    swatch: { dark: DARK.pulse.resource, light: LIGHT.pulse.resource },
-    colors: [DARK.pulse.resource, LIGHT.pulse.resource],
-  },
-  {
-    label: 'Story',
-    swatch: { dark: DARK.pulse.story, light: LIGHT.pulse.story },
-    colors: [DARK.pulse.story, LIGHT.pulse.story],
-  },
-  {
-    label: 'Care',
-    swatch: { dark: DARK.pulse.care, light: LIGHT.pulse.care },
-    colors: [DARK.pulse.care, LIGHT.pulse.care],
-  },
-  {
-    label: 'Core value',
-    swatch: { dark: DARK.pulse.coreValue, light: LIGHT.pulse.coreValue },
-    colors: [DARK.pulse.coreValue, LIGHT.pulse.coreValue],
-  },
-  {
-    label: 'Pulse',
-    swatch: { dark: OVERLAY_PULSE[0], light: lightColorFor(OVERLAY_PULSE[0]) },
-    colors: OVERLAY_PULSE,
-  },
-  {
-    label: 'Resonance',
-    swatch: {
-      dark: OVERLAY_RESONANCE[0],
-      light: lightColorFor(OVERLAY_RESONANCE[0]),
-    },
-    colors: OVERLAY_RESONANCE,
-  },
-  {
-    label: 'Promise weave',
-    swatch: { dark: DARK.weaveNode, light: LIGHT.weaveNode },
-    colors: [
-      DARK.weaveNode,
-      LIGHT.weaveNode,
-      ...ov(NODE_STYLE.PromiseWeave.color),
-    ],
-  },
-  {
-    label: 'Organization',
-    swatch: {
-      dark: NODE_STYLE.Organization.color,
-      light: lightColorFor(NODE_STYLE.Organization.color),
-    },
-    colors: ov(NODE_STYLE.Organization.color),
-  },
-  {
-    label: 'Community',
-    swatch: {
-      dark: NODE_STYLE.Community.color,
-      light: lightColorFor(NODE_STYLE.Community.color),
-    },
-    colors: ov(NODE_STYLE.Community.color),
-  },
-  {
-    label: 'Document',
-    swatch: {
-      dark: NODE_STYLE.Document.color,
-      light: lightColorFor(NODE_STYLE.Document.color),
-    },
-    colors: ov(NODE_STYLE.Document.color),
-  },
-  {
-    label: 'Person',
-    swatch: { dark: DARK.person, light: LIGHT.person },
-    colors: [DARK.person, LIGHT.person, ...ov(NODE_STYLE.Person.color)],
-  },
-  // Catch-all: SpaceMembership shares the executor's unknown-label fallback
-  // slate, so one honest row decodes both.
-  {
-    label: 'Other',
-    swatch: {
-      dark: UNKNOWN_NODE_STYLE.color,
-      light: lightColorFor(UNKNOWN_NODE_STYLE.color),
-    },
-    colors: ov(UNKNOWN_NODE_STYLE.color),
-  },
-]
-
-// Edge rows. The rendered edge colors are translucent rgba — faint by design
-// on the canvas — so the legend swatch uses a solid, AA-visible stand-in of
-// the same hue that reads on a light- or dark-mode glass panel. `Initiated by`
-// (field view) and `Structure` (space/root view) never co-occur, so a shared
-// slate swatch is unambiguous.
-const LEGEND_EDGES: LegendItem[] = [
-  {
-    label: 'Resonance',
-    swatch: { dark: '#a78bfa', light: '#7245f7' },
-    colors: [DARK.resonanceEdge, LIGHT.resonanceEdge],
-  },
-  {
-    label: 'Weaves',
-    swatch: { dark: DARK.weaveNode, light: LIGHT.weaveNode },
-    colors: [DARK.weaveEdge, LIGHT.weaveEdge],
-  },
-  {
-    label: 'Connected',
-    swatch: { dark: '#f472b6', light: '#ce1073' },
-    colors: [DARK.connectedEdge, LIGHT.connectedEdge],
-  },
-  {
-    label: 'Initiated by',
-    swatch: { dark: '#94a3b8', light: '#5a6d88' },
-    colors: [DARK.initiatedEdge, LIGHT.initiatedEdge],
-  },
-  {
-    label: 'Structure',
-    swatch: { dark: '#94a3b8', light: '#5a6d88' },
-    colors: [DARK.structuralEdge, LIGHT.structuralEdge],
-  },
-  {
-    // GOAL-346. The whole point of the Document layer is to explain why a
-    // person is on the canvas, so its edge is the one that most needs
-    // decoding. Only ever present when the Documents layer is switched on —
-    // `presentItems` drops the row otherwise.
-    label: 'Named in',
-    swatch: { dark: '#fbbf24', light: '#9e7303' },
-    colors: [DARK.extractedEdge, LIGHT.extractedEdge],
-  },
-]
-
-/** Strip whitespace + lowercase so rgba/hex compare regardless of formatting. */
-const norm = (c: string | undefined): string =>
-  (c ?? '').toLowerCase().replace(/\s+/g, '')
-
-function presentItems(items: LegendItem[], colors: Set<string>): LegendItem[] {
-  return items.filter((item) => item.colors.some((c) => colors.has(norm(c))))
-}
 
 export const BloomLegend: FC<{
+  /** The canvas BEFORE type filtering — see the note above. */
   nodes: Node[]
   relationships: Relationship[]
-}> = ({ nodes, relationships }) => {
+  filters: BloomTypeFilters
+}> = ({ nodes, relationships, filters }) => {
   const [open, setOpen] = useState(false)
   const isDark = useIsDarkMode()
+  const { hidden, toggle, showAll } = filters
 
   const { nodeRows, edgeRows } = useMemo(() => {
-    const nodeColors = new Set(nodes.map((n) => norm(n.color)))
+    const nodeColors = new Set(nodes.map((n) => normalizeColor(n.color)))
     const edgeColors = new Set(
-      relationships.map((r) => norm((r as { color?: string }).color))
+      relationships.map((r) => normalizeColor((r as { color?: string }).color))
     )
     return {
-      nodeRows: presentItems(LEGEND_NODES, nodeColors),
-      edgeRows: presentItems(LEGEND_EDGES, edgeColors),
+      nodeRows: presentNodeRows(nodeColors),
+      edgeRows: presentRelationshipRows(edgeColors),
     }
   }, [nodes, relationships])
 
+  // Only count types this canvas can actually show. Counting every hidden key
+  // would report a filter the viewer has no row for — the Documents default in
+  // a field with no uploads, say — which reads as the canvas withholding
+  // something it isn't. Presence itself is resolved through the registry's
+  // colour index, so a row that could never act is not offered and cannot be
+  // counted here either.
+  const hiddenCount = useMemo(
+    () =>
+      [...nodeRows, ...edgeRows].filter((row) => hidden.has(row.key)).length,
+    [nodeRows, edgeRows, hidden]
+  )
+
   // Nothing on the canvas to decode → no legend (loading / empty states).
   if (nodeRows.length === 0 && edgeRows.length === 0) return null
+
+  const panelId = 'bloom-legend-panel'
 
   return (
     // Sits clear of the bottom-center action bar: stacked above it on mobile,
@@ -276,50 +88,98 @@ export const BloomLegend: FC<{
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
-          aria-label={open ? 'Hide legend' : 'Show legend'}
-          title={open ? 'Hide legend' : 'Show legend'}
-          className="gp-glass-hover cursor-pointer flex items-center gap-2 h-9 px-2.5 sm:px-3 rounded-full gp-glass border border-gp-glass-border shadow-xl text-gp-ink-muted hover:text-gp-primary"
+          aria-controls={panelId}
+          aria-label={
+            open
+              ? 'Hide legend and type filters'
+              : hiddenCount > 0
+                ? `Show legend and type filters — ${hiddenCount} ${
+                    hiddenCount === 1 ? 'type' : 'types'
+                  } hidden`
+                : 'Show legend and type filters'
+          }
+          title={open ? 'Hide legend' : 'Legend and type filters'}
+          className={cn(
+            'gp-glass-hover cursor-pointer flex items-center gap-2 h-9 px-2.5 sm:px-3',
+            'rounded-full gp-glass border shadow-xl',
+            // Tinted while a filter is on, so a canvas that is hiding
+            // something never looks like a canvas that has nothing.
+            hiddenCount > 0
+              ? 'border-gp-primary/40 text-gp-primary'
+              : 'border-gp-glass-border text-gp-ink-muted hover:text-gp-primary'
+          )}
         >
           <span className="material-symbols-outlined text-lg leading-none">
             {open ? 'close' : 'legend_toggle'}
           </span>
           <span className="hidden sm:inline text-xs font-semibold">Legend</span>
+          {hiddenCount > 0 && (
+            <span
+              aria-hidden
+              className="shrink-0 rounded-full bg-gp-primary/15 px-1.5 text-[10px] font-bold tabular-nums text-gp-primary"
+            >
+              {hiddenCount}
+            </span>
+          )}
         </button>
 
         {open && (
-          <div className="w-48 max-w-[72vw] rounded-2xl gp-glass border border-gp-glass-border shadow-xl p-3 animate-fade-in">
-            <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.18em] text-gp-ink-muted">
-              Legend
-            </p>
+          <div
+            id={panelId}
+            className="w-52 max-w-[72vw] rounded-2xl gp-glass border border-gp-glass-border shadow-xl p-3 animate-fade-in"
+          >
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="min-w-0 truncate text-[10px] font-bold uppercase tracking-[0.18em] text-gp-ink-muted">
+                Legend
+              </p>
+              {hiddenCount > 0 && (
+                <button
+                  type="button"
+                  onClick={showAll}
+                  className="gp-menu-item shrink-0 cursor-pointer rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-gp-primary"
+                >
+                  Show all
+                </button>
+              )}
+            </div>
 
-            {nodeRows.length > 0 && (
-              <ul className="space-y-1.5">
-                {nodeRows.map((row) => (
-                  <LegendRow
-                    key={row.label}
-                    item={row}
-                    shape="dot"
-                    isDark={isDark}
-                  />
-                ))}
-              </ul>
-            )}
-
-            {edgeRows.length > 0 && (
-              <>
-                <div className="my-2.5 h-px bg-gp-glass-border" />
-                <ul className="space-y-1.5">
-                  {edgeRows.map((row) => (
-                    <LegendRow
-                      key={row.label}
-                      item={row}
-                      shape="line"
+            {/* Caps the list on a phone: the legend is a floating canvas
+                overlay, so a field with every type present has to scroll
+                rather than grow up into the header chrome. */}
+            <div className="max-h-[45vh] overflow-y-auto overscroll-contain sm:max-h-[60vh]">
+              {nodeRows.length > 0 && (
+                <ul className="space-y-0.5">
+                  {nodeRows.map((row) => (
+                    <TypeToggleRow
+                      key={row.key}
+                      row={row}
+                      shape="dot"
                       isDark={isDark}
+                      visible={!hidden.has(row.key)}
+                      onToggle={toggle}
                     />
                   ))}
                 </ul>
-              </>
-            )}
+              )}
+
+              {edgeRows.length > 0 && (
+                <>
+                  <div className="my-2 h-px bg-gp-glass-border" />
+                  <ul className="space-y-0.5">
+                    {edgeRows.map((row) => (
+                      <TypeToggleRow
+                        key={row.key}
+                        row={row}
+                        shape="line"
+                        isDark={isDark}
+                        visible={!hidden.has(row.key)}
+                        onToggle={toggle}
+                      />
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -327,22 +187,64 @@ export const BloomLegend: FC<{
   )
 }
 
-const LegendRow: FC<{
-  item: LegendItem
+/**
+ * One type, as a switch.
+ *
+ * `role="switch"` + `aria-checked` is what makes this a real control rather
+ * than a colour chip: assistive tech announces the type name and whether it is
+ * on, which a swatch alone cannot carry. The swatch stays `aria-hidden` — it
+ * is decoration next to the name, not the name itself. `.gp-menu-item` gives
+ * the row its hover AND keyboard-focus highlight, re-derived from the themed
+ * primary so the affordance survives every theme and both modes.
+ */
+const TypeToggleRow: FC<{
+  row: BloomTypeRow
   shape: 'dot' | 'line'
   isDark: boolean
-}> = ({ item, shape, isDark }) => (
-  <li className="flex items-center gap-2.5">
-    <span
-      aria-hidden
-      className={cn(
-        'shrink-0',
-        shape === 'dot' ? 'size-3 rounded-full' : 'h-0.5 w-4 rounded-full'
-      )}
-      style={{ background: isDark ? item.swatch.dark : item.swatch.light }}
-    />
-    <span className="truncate text-xs font-medium text-gp-ink-strong">
-      {item.label}
-    </span>
+  visible: boolean
+  onToggle: (key: string) => void
+}> = ({ row, shape, isDark, visible, onToggle }) => (
+  <li>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={visible}
+      onClick={() => onToggle(row.key)}
+      title={
+        visible
+          ? `Hide ${row.label} on the canvas`
+          : `Show ${row.label} on the canvas`
+      }
+      className="gp-menu-item flex w-full cursor-pointer items-center gap-2.5 rounded-md px-1.5 py-1 text-left"
+    >
+      <span
+        aria-hidden
+        className={cn(
+          'shrink-0 transition-opacity',
+          shape === 'dot' ? 'size-3 rounded-full' : 'h-0.5 w-4 rounded-full',
+          // Dimmed rather than removed: the colour still has to be readable
+          // while off, or you cannot tell which type you are switching back on.
+          visible ? 'opacity-100' : 'opacity-30'
+        )}
+        style={{ background: isDark ? row.swatch.dark : row.swatch.light }}
+      />
+      <span
+        className={cn(
+          'min-w-0 flex-1 truncate text-xs font-medium',
+          visible ? 'text-gp-ink-strong' : 'text-gp-ink-muted line-through'
+        )}
+      >
+        {row.label}
+      </span>
+      <span
+        aria-hidden
+        className={cn(
+          'material-symbols-outlined shrink-0 text-base leading-none',
+          visible ? 'text-gp-ink-muted' : 'text-gp-ink-soft'
+        )}
+      >
+        {visible ? 'visibility' : 'visibility_off'}
+      </span>
+    </button>
   </li>
 )

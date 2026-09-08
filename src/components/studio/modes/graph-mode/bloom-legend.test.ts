@@ -6,13 +6,19 @@
  *   - the native views (bloom-view.tsx) paint with `bloom-palette.ts`, and
  *   - the AI-Companion overlay (query_for_bloom → execute.ts) paints with
  *     `node-style.ts` (NODE_STYLE / UNKNOWN_NODE_STYLE).
- * The legend (LEGEND_NODES in bloom-legend.tsx) decodes rendered colors back
- * into labeled rows. GOAL-288 happened because the legend hand-mirrored the
- * overlay hexes and PromiseWeave's fuchsia was missing — assistant-rendered
- * weaves showed no legend row. This test fails the moment a palette entry is
- * added (or recolored) without a legend row that lists its color.
+ * The legend (BLOOM_NODE_TYPES in bloom-type-registry.ts) decodes rendered
+ * colors back into labeled rows. GOAL-288 happened because the legend
+ * hand-mirrored the overlay hexes and PromiseWeave's fuchsia was missing —
+ * assistant-rendered weaves showed no legend row. This test fails the moment a
+ * palette entry is added (or recolored) without a legend row that lists its
+ * color.
+ *
+ * Since GOAL-350 those rows are also the canvas's type toggles, so an
+ * undecodable color now costs more than a missing legend entry: a node of that
+ * type would have no control at all (and `applyBloomTypeFilters` would always
+ * keep it, by design — it never hides what it cannot name).
  */
-import { LEGEND_NODES } from './bloom-legend'
+import { BLOOM_NODE_TYPES as LEGEND_NODES } from './bloom-type-registry'
 import {
   NODE_STYLE,
   UNKNOWN_NODE_STYLE,
