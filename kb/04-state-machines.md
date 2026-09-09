@@ -183,6 +183,15 @@ Not Started → In Progress → Completed
 
 ## Document Ingest Status (GOAL-292)
 
+> **GOAL-354 rename.** Once the cutover lands, this machine lives on
+> `ResourcePulse.ingestStatus`, not `Document.status` — `ResourcePulse.status`
+> already exists with the pulse's own unrelated meaning, and the staleness clock
+> becomes `ingestStatusUpdatedAt`. The states, guards, claim fencing and attempt
+> cap are unchanged. Until the ingest code is re-anchored the text below is still
+> literally accurate; `scripts/migrate-document-to-resource.ts` refuses to run
+> while any document is `PENDING`/`PROCESSING`, because a document that loses its
+> `:Document` label mid-flight can never be claimed, reclaimed or completed.
+
 ```
 PENDING → PROCESSING → COMPLETE
                      → FAILED

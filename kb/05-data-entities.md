@@ -310,6 +310,27 @@ and ingest ConversationThreads survive; their edges drop. See
 
 **Neo4j Labels:** `["FieldPulse", "ResourcePulse"]`
 
+**GOAL-354 — a document is a ResourcePulse.** `resourceType` is an open string,
+not an enum: `document`, `article`, and whatever a future source type needs
+(blog post, video, podcast, book) without a further data-model change. A
+resource backed by a source file additionally carries the `source*` / `ingest*`
+block below, migrated off the retired `:Document` node. The file bytes never
+enter Neo4j — they stay in S3 and the graph holds only the key/URL.
+
+Every field in that block is `@settable(onCreate: false, onUpdate: false)`, and
+so is the `uploadedBy` **relationship**. That is load-bearing, not tidiness:
+`:Document` carried `@mutation(operations: [])` so generated CRUD could not
+reach its ingest machinery, but `ResourcePulse` *does* expose generated CRUD, so
+the guard has to move down to field level. Without it, any ADMIN/MEMBER of the
+Space could re-queue ingestion via `update: { ingestStatus_SET: "PENDING" }`
+(unbounded model spend billed to the original uploader), plant member-visible
+copy in `ingestStatusMessage`, falsify the entity counts, or re-point
+`UPLOADED_BY` — which is the captured authorization decision the cron worker
+runs as. The blob pointers additionally carry `@selectable(onRead: false)`,
+`@filterable(byValue: false)` **and** `@sortable(byValue: false)`; the last is
+not implied by the others, and ordering by a hidden field is a comparison oracle
+(the GOAL-275 lesson). **Any field added to that block must repeat all of these.**
+
 | Field        | Type     | Notes                       |
 | ------------ | -------- | --------------------------- |
 | id           | string   | Unique                      |
@@ -326,7 +347,35 @@ and ingest ConversationThreads survive; their edges drop. See
 | createdAt    | datetime |                             |
 | modifiedAt   | datetime |                             |
 
-**Relationships:** Same as GoalPulse.
+**Source-file properties (GOAL-354).** Null on resources with no backing file.
+
+| Field                    | Type     | Notes                                                                                     |
+| ------------------------ | -------- | ----------------------------------------------------------------------------------------- |
+| sourceFilename           | string   | Original filename; seeds `title` at migration                                              |
+| sourceMimeType           | string   | v1: `text/plain`, `text/markdown`, `application/pdf`                                       |
+| sourceSizeBytes          | int      |                                                                                            |
+| sourcePageCount          | int      | `1` for .txt/.md; real page count for .pdf; null until the worker reads the blob            |
+| sourceBlobKey            | string   | S3 object key. Not selectable, not filterable, **not sortable**                            |
+| sourceBlobUrl            | string   | Provider-issued URL; may expire. Same three gates                                          |
+| sourceUrl                | string   | Public link the bytes were fetched from by the bulk article import; null for uploads       |
+| sourceUserHint           | string   | Optional one-line "What is this?" hint; reused on re-extract                                |
+| sourceSummary            | string   | AI 1-paragraph synopsis, refreshed on re-extract. Kept distinct from `content` so a re-extract never clobbers member-edited copy |
+| sourceConcepts           | string[] | Up to 5 concept phrases; empty on failure                                                  |
+| ingestStatus             | string   | Ingest lifecycle. **Named `ingestStatus`, not `status`** — `ResourcePulse.status` already exists with the pulse's own unrelated meaning. See `kb/04-state-machines.md` |
+| ingestStatusMessage      | string   | Member-safe failure copy; null unless FAILED                                                |
+| ingestStatusUpdatedAt    | datetime | *Internal.* Staleness clock for reclaiming dead claims                                      |
+| ingestAttempts           | int      | *Internal.* At 3 a stalled claim is abandoned to FAILED                                     |
+| ingestClaimedBy          | string   | *Internal.* Worker run id holding the claim                                                 |
+| ingestLockToken          | string   | *Internal.* Forces Neo4j's write lock during a claim; never read                            |
+| ingestCreatedEntityCount | int      | Tool calls the ingest run landed                                                            |
+| ingestFailedEntityCount  | int      | Proposed entities whose write failed                                                        |
+| uploadedAt               | datetime | *Internal.* Retained from the Document node; also seeds `createdAt`                         |
+
+**Relationships:** Same as GoalPulse, plus `UPLOADED_BY` → Person (the member who
+brought the source file in — retained as its own edge so the audit trail survives
+author re-attribution) and, on migrated documents, inbound `EXTRACTED_FROM` from
+every Person / Organization / FieldPulse the extractor pulled out of it, and
+`HAS_INGEST_THREAD` → ConversationThread.
 
 ---
 
@@ -1092,6 +1141,7 @@ spend-cap *config* mutations WILL be logged; that is out of scope for Phase 1.)
 | `person_invite_token_hash`         | Person.inviteTokenHash          |
 | `person_reset_token_hash`          | Person.resetTokenHash           |
 | `llm_usage_createdAt`              | LlmUsage.createdAt              |
+| `resource_ingest_status`           | ResourcePulse.ingestStatus — the ingest queue after GOAL-354. Matters strictly more than `document_status` did: the cron's seek is the same shape but the label it scans is ~5x larger. `pulse_id` is on `:FieldPulse`, NOT `:ResourcePulse`, so the re-anchored by-id claim must match `(d:FieldPulse {id})` and assert the label in a WHERE, or it degrades to a label scan |
 | `document_status`                  | Document.status — the ingest queue; the one-minute cron seeks it twice per tick (measured 53 dbHits with it vs 10,101 without, at 5k documents) |
 | `article_import_job_status`        | ArticleImportJob.status — the bulk-import queue; the one-minute cron seeks it twice per tick and every enqueue seeks it twice more for the in-flight cap. **The drain query must anchor on this seek, not on `(c:FieldContext)-[:HAS_IMPORT_JOB]->(j)`** — the context-anchored form never touches the index and label-scans instead (measured 1,501 dbHits vs 1 at a 1,500-job backlog). It plans as a seek against an EMPTY label, so only a seeded profile proves anything |
 | `context_deletedAt`                | FieldContext.deletedAt — the daily purge sweep (GOAL-319) |
