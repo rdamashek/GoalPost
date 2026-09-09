@@ -183,6 +183,22 @@ Not Started → In Progress → Completed
 
 ## Document Ingest Status (GOAL-292)
 
+> **GOAL-354 rename — the code has moved, the data has not.** This machine now
+> lives on `ResourcePulse.ingestStatus`, not `Document.status`
+> (`ResourcePulse.status` already exists with the pulse's own unrelated
+> meaning), and the staleness clock is `ingestStatusUpdatedAt`. The states,
+> guards, claim fencing and attempt cap are all unchanged — only the node and
+> the property names moved. Read every `Document.status` below as
+> `ResourcePulse.ingestStatus`.
+>
+> **Ingestion therefore does not work against an unmigrated database.** The
+> queue seeks `(:ResourcePulse {ingestStatus: …})`, and until
+> `scripts/migrate-document-to-resource.ts` has run, the environment's documents
+> are still `:Document` nodes the queue cannot see. That is the cutover: deploy
+> the code, drain the queue, migrate. The script refuses to run while anything
+> is `PENDING`/`PROCESSING`, because a document that loses its `:Document` label
+> mid-flight can never be claimed, reclaimed or completed.
+
 ```
 PENDING → PROCESSING → COMPLETE
                      → FAILED

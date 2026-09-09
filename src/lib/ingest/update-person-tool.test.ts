@@ -8,7 +8,7 @@ import { initGraph } from '@/modules/graph'
  * (GOAL-239 slice 4 AC):
  *
  *   - existing Person:PersonPulse node is updated in place
- *   - (:Person)-[:EXTRACTED_FROM]->(:Document) edge is APPENDED (not replaced)
+ *   - (:Person)-[:EXTRACTED_FROM]->(:ResourcePulse) edge is APPENDED (not replaced)
  *   - existing EXTRACTED_FROM edges to prior documents survive
  *   - exactly one Log entry per update, attributed to the editor
  *   - permission gate refuses non-members without mutating the graph
@@ -43,8 +43,8 @@ beforeAll(async () => {
       CREATE (u:Person:User {id: $userId, firstName: 'Test', lastName: 'Editor', name: 'Test Editor', createdAt: datetime()})
       CREATE (s:Space:MeSpace {id: $spaceId, name: 'Test MeSpace', visibility: 'PRIVATE', createdAt: datetime()})
       CREATE (c:FieldContext {id: $ctxId, title: 'Care Practices', createdAt: datetime()})
-      CREATE (dA:Document {id: $docA, filename: 'first.txt', mimeType: 'text/plain', sizeBytes: 1, uploadedAt: datetime()})
-      CREATE (dB:Document {id: $docB, filename: 'second.txt', mimeType: 'text/plain', sizeBytes: 1, uploadedAt: datetime()})
+      CREATE (dA:FieldPulse:ResourcePulse {id: $docA, resourceType: 'document', title: 'first.txt', content: 'fixture', createdAt: datetime(), sourceFilename: 'first.txt', sourceMimeType: 'text/plain', sourceSizeBytes: 1, uploadedAt: datetime()})
+      CREATE (dB:FieldPulse:ResourcePulse {id: $docB, resourceType: 'document', title: 'second.txt', content: 'fixture', createdAt: datetime(), sourceFilename: 'second.txt', sourceMimeType: 'text/plain', sourceSizeBytes: 1, uploadedAt: datetime()})
       CREATE (p:Person:PersonPulse {
         id: $personId,
         firstName: 'Sarah',
@@ -54,8 +54,8 @@ beforeAll(async () => {
       })
       CREATE (u)-[:OWNS]->(s)
       CREATE (s)-[:HAS_CONTEXT]->(c)
-      CREATE (c)-[:HAS_DOCUMENT]->(dA)
-      CREATE (c)-[:HAS_DOCUMENT]->(dB)
+      CREATE (c)-[:HAS_PULSE]->(dA)
+      CREATE (c)-[:HAS_PULSE]->(dB)
       CREATE (dA)-[:UPLOADED_BY]->(u)
       CREATE (dB)-[:UPLOADED_BY]->(u)
       CREATE (c)-[:HAS_PERSON]->(p)
@@ -202,7 +202,7 @@ describe('executeAuthorizedWriteTool — update_person (slice 4)', () => {
       try {
         const rows = await session.run(
           `
-          MATCH (p:Person {id: $personId})-[r:EXTRACTED_FROM]->(d:Document {id: $docB})
+          MATCH (p:Person {id: $personId})-[r:EXTRACTED_FROM]->(d:ResourcePulse {id: $docB})
           RETURN count(r) AS edgeCount
           `,
           { personId: ids.person, docB: ids.documentB }

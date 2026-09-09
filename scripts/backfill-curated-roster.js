@@ -84,7 +84,7 @@ const MATCH_HAND_ADDED = `
   MATCH (c:FieldContext)-[hp:HAS_PERSON]->(p:Person)
   WHERE hp.curated IS NULL
     AND NOT EXISTS {
-      MATCH (p)-[:EXTRACTED_FROM]->(d:Document)<-[:HAS_DOCUMENT]-(c)
+      MATCH (p)-[:EXTRACTED_FROM]->(d:ResourcePulse)<-[:HAS_PULSE]-(c)
     }
 `
 

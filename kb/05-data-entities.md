@@ -310,23 +310,73 @@ and ingest ConversationThreads survive; their edges drop. See
 
 **Neo4j Labels:** `["FieldPulse", "ResourcePulse"]`
 
-| Field        | Type     | Notes                       |
-| ------------ | -------- | --------------------------- |
-| id           | string   | Unique                      |
-| title        | string   | Required                    |
-| content      | string   | Required                    |
-| resourceType | string   | Required — type of resource |
-| availability | float    | Optional                    |
-| intensity    | float    | 0.0–1.0, optional           |
-| status       | string   | Optional                    |
-| why          | string   | Optional                    |
-| location     | string   | Optional                    |
-| time         | string   | Optional                    |
-| embedding    | float[]  | 1536-dim vector             |
-| createdAt    | datetime |                             |
-| modifiedAt   | datetime |                             |
+**GOAL-354 — a document is a ResourcePulse.** `resourceType` is an open string,
+not an enum: `document`, `article`, and whatever a future source type needs
+(blog post, video, podcast, book) without a further data-model change. A
+resource backed by a source file additionally carries the `source*` / `ingest*`
+block below, migrated off the retired `:Document` node. The file bytes never
+enter Neo4j — they stay in S3 and the graph holds only the key/URL.
 
-**Relationships:** Same as GoalPulse.
+Every field in that block is `@settable(onCreate: false, onUpdate: false)`, and
+so is the `uploadedBy` **relationship**. That is load-bearing, not tidiness:
+`:Document` carried `@mutation(operations: [])` so generated CRUD could not
+reach its ingest machinery, but `ResourcePulse` *does* expose generated CRUD, so
+the guard has to move down to field level. Without it, any ADMIN/MEMBER of the
+Space could re-queue ingestion via `update: { ingestStatus_SET: "PENDING" }`
+(unbounded model spend billed to the original uploader), plant member-visible
+copy in `ingestStatusMessage`, falsify the entity counts, or re-point
+`UPLOADED_BY` — which is the captured authorization decision the cron worker
+runs as. The blob pointers additionally carry `@selectable(onRead: false)`,
+`@filterable(byValue: false)` **and** `@sortable(byValue: false)`; the last is
+not implied by the others, and ordering by a hidden field is a comparison oracle
+(the GOAL-275 lesson). **Any field added to that block must repeat all of these.**
+
+| Field        | Type     | Notes                                                                                                                                                                                                                                                                                                                        |
+| ------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| id           | string   | Unique                                                                                                                                                                                                                                                                                                                       |
+| title        | string   | Required                                                                                                                                                                                                                                                                                                                     |
+| content      | string   | Required                                                                                                                                                                                                                                                                                                                     |
+| resourceType | string   | Required — type of resource. Free text, not an enum: extensible by design (GOAL-354). Stored lower-cased by the bulk article import, which reads it from the sheet's `resource_type` column and falls back to `'article'` (GOAL-355)                                                                                            |
+| availability | float    | Optional                                                                                                                                                                                                                                                                                                                     |
+| intensity    | float    | 0.0–1.0, optional                                                                                                                                                                                                                                                                                                            |
+| status       | string   | Optional                                                                                                                                                                                                                                                                                                                     |
+| why          | string   | Optional                                                                                                                                                                                                                                                                                                                     |
+| location     | string   | Optional — the resource itself                                                                                                                                                                                                                                                                                               |
+| sourceUrl    | string   | Optional — where the resource was *found* (a LinkedIn post, a newsletter), as distinct from `location`. Written by the bulk article import from the sheet's `source_url` column (GOAL-355), and by document ingestion with the link an article's bytes were fetched from (GOAL-344) — where it doubles as that import's idempotency key. Member-correctable, unlike the rest of the source block. Its own property precisely so the doc-ingest summary that may replace a placeholder `content` can never overwrite it. Null elsewhere |
+| time         | string   | Optional                                                                                                                                                                                                                                                                                                                     |
+| embedding    | float[]  | 1536-dim vector                                                                                                                                                                                                                                                                                                              |
+| createdAt    | datetime |                                                                                                                                                                                                                                                                                                                              |
+| modifiedAt   | datetime |                                                                                                                                                                                                                                                                                                                              |
+
+**Source-file properties (GOAL-354).** Null on resources with no backing file.
+
+| Field                    | Type     | Notes                                                                                     |
+| ------------------------ | -------- | ----------------------------------------------------------------------------------------- |
+| sourceFilename           | string   | Original filename; seeds `title` at migration                                              |
+| sourceMimeType           | string   | v1: `text/plain`, `text/markdown`, `application/pdf`                                       |
+| sourceSizeBytes          | int      |                                                                                            |
+| sourcePageCount          | int      | `1` for .txt/.md; real page count for .pdf; null until the worker reads the blob            |
+| sourceBlobKey            | string   | S3 object key. Not selectable, not filterable, **not sortable**                            |
+| sourceBlobUrl            | string   | Provider-issued URL; may expire. Same three gates                                          |
+| sourceUrl                | string   | Public link the bytes were fetched from by the bulk article import; null for uploads       |
+| sourceUserHint           | string   | Optional one-line "What is this?" hint; reused on re-extract                                |
+| sourceSummary            | string   | AI 1-paragraph synopsis, refreshed on re-extract. Kept distinct from `content` so a re-extract never clobbers member-edited copy |
+| sourceConcepts           | string[] | Up to 5 concept phrases; empty on failure                                                  |
+| ingestStatus             | string   | Ingest lifecycle. **Named `ingestStatus`, not `status`** — `ResourcePulse.status` already exists with the pulse's own unrelated meaning. See `kb/04-state-machines.md` |
+| ingestStatusMessage      | string   | Member-safe failure copy; null unless FAILED                                                |
+| ingestStatusUpdatedAt    | datetime | *Internal.* Staleness clock for reclaiming dead claims                                      |
+| ingestAttempts           | int      | *Internal.* At 3 a stalled claim is abandoned to FAILED                                     |
+| ingestClaimedBy          | string   | *Internal.* Worker run id holding the claim                                                 |
+| ingestLockToken          | string   | *Internal.* Forces Neo4j's write lock during a claim; never read                            |
+| ingestCreatedEntityCount | int      | Tool calls the ingest run landed                                                            |
+| ingestFailedEntityCount  | int      | Proposed entities whose write failed                                                        |
+| uploadedAt               | datetime | *Internal.* Retained from the Document node; also seeds `createdAt`                         |
+
+**Relationships:** Same as GoalPulse, plus `UPLOADED_BY` → Person (the member who
+brought the source file in — retained as its own edge so the audit trail survives
+author re-attribution) and, on migrated documents, inbound `EXTRACTED_FROM` from
+every Person / Organization / FieldPulse the extractor pulled out of it, and
+`HAS_INGEST_THREAD` → ConversationThread.
 
 ---
 
@@ -626,17 +676,30 @@ semantic org discovery is a follow-up (resonance is pulse↔pulse today).
 
 Server-side persisted AI assistant chat thread. A `User` can own many — one
 implicit "reflective" thread created on first message, plus any threads
-spawned via the sidebar "+" or doc-ingest. The active thread on hydration is
-either the pinned `User.lastViewedThreadId` or, failing that, the most
-recently updated. Survives page reloads and reopens of the assistant panel;
-replays via `useChatRuntime({ messages })` on mount.
+spawned via the sidebar "+" or doc-ingest.
+
+**Hydration (GOAL-345): the panel opens on an empty conversation on every
+initial load** — fresh navigation, hard refresh, new tab. No thread is
+restored on arrival, and no thread node is created just by loading the app.
+Threads are hydrated only when the member explicitly picks one from the
+switcher / threads sidebar (`GET /api/chat/simulation/thread?id=…`, which
+requires an id), and the landing conversation creates its thread lazily on the
+first send so that turn carries an explicit id rather than MERGEing onto the
+implicit `ownerId`-keyed thread. Replay is via `useChatRuntime({ messages })`
+on mount.
+
+There is no last-viewed pin. GOAL-240 introduced `User.lastViewedThreadId` so a
+hard refresh re-opened the last thread; GOAL-345 reversed that and removed the
+property's readers and writers — including the stamp `createIngestThread` used
+to apply, which made every load after a background ingest land in an
+"Uploaded ….pdf" thread the member never opened.
 
 | Field       | Type     | Notes                                                                            |
 | ----------- | -------- | -------------------------------------------------------------------------------- |
 | id          | string   | UUID, UNIQUE                                                                     |
 | ownerId     | string   | Set only on the implicit reflective thread (MERGE key in `appendConversationTurn`). Not unique; concurrent first-writes can produce two implicit threads, which is acceptable degeneracy — both surface in the sidebar normally. |
 | createdAt   | datetime |                                                                                  |
-| lastTurnAt  | datetime | Indexed — drives the "active thread" selection                                   |
+| lastTurnAt  | datetime | Indexed — orders the thread switcher (newest first)                              |
 | turnCount   | int      | Atomic counter — incremented per append, source of `Turn.order`                  |
 | mode        | string   | `'default' \| 'aiden' \| 'braider'`. Locked to `'default'` on ingest threads.   |
 | kind        | string   | `'reflective' \| 'ingest'`. Drives the mode-selector lock in the switcher.       |
@@ -1079,6 +1142,7 @@ spend-cap *config* mutations WILL be logged; that is out of scope for Phase 1.)
 | `person_invite_token_hash`         | Person.inviteTokenHash          |
 | `person_reset_token_hash`          | Person.resetTokenHash           |
 | `llm_usage_createdAt`              | LlmUsage.createdAt              |
+| `resource_ingest_status`           | ResourcePulse.ingestStatus — the ingest queue after GOAL-354. Matters strictly more than `document_status` did: the cron's seek is the same shape but the label it scans is ~5x larger. `pulse_id` is on `:FieldPulse`, NOT `:ResourcePulse`, so the re-anchored by-id claim must match `(d:FieldPulse {id})` and assert the label in a WHERE, or it degrades to a label scan |
 | `document_status`                  | Document.status — the ingest queue; the one-minute cron seeks it twice per tick (measured 53 dbHits with it vs 10,101 without, at 5k documents) |
 | `article_import_job_status`        | ArticleImportJob.status — the bulk-import queue; the one-minute cron seeks it twice per tick and every enqueue seeks it twice more for the in-flight cap. **The drain query must anchor on this seek, not on `(c:FieldContext)-[:HAS_IMPORT_JOB]->(j)`** — the context-anchored form never touches the index and label-scans instead (measured 1,501 dbHits vs 1 at a 1,500-job backlog). It plans as a seek against an EMPTY label, so only a seeded profile proves anything |
 | `context_deletedAt`                | FieldContext.deletedAt — the daily purge sweep (GOAL-319) |

@@ -88,7 +88,7 @@ afterAll(async () => {
       { ownerId: ids.owner }
     )
     await session.run(
-      `MATCH (c:FieldContext {id: $ctxId})-[:HAS_DOCUMENT]->(d:Document) DETACH DELETE d`,
+      `MATCH (c:FieldContext {id: $ctxId})-[:HAS_PULSE]->(d:ResourcePulse) DETACH DELETE d`,
       { ctxId: ids.fieldContext }
     )
     await session.run(
@@ -165,7 +165,7 @@ describe('Slice 7 — upload permission gate (GOAL-242)', () => {
       const session = driver.session()
       try {
         const docRows = await session.run(
-          `MATCH (d:Document) WHERE d.filename = 'guest-attempt.txt' RETURN d.id AS id`
+          `MATCH (d:ResourcePulse) WHERE d.sourceFilename = 'guest-attempt.txt' RETURN d.id AS id`
         )
         expect(docRows.records).toHaveLength(0)
 
@@ -278,7 +278,7 @@ describe('Slice 7 — provenance + no auto-CONNECTED_TO + Log metadata (GOAL-242
           `
           MATCH (c:FieldContext {id: $ctxId})-[:HAS_PERSON]->(p:Person)
           WHERE p.firstName IN ['Maya', 'Sam', 'June']
-          MATCH (p)-[:EXTRACTED_FROM]->(d:Document {id: $docId})
+          MATCH (p)-[:EXTRACTED_FROM]->(d:ResourcePulse {id: $docId})
           RETURN p.firstName AS firstName
           ORDER BY p.firstName ASC
           `,
@@ -418,8 +418,8 @@ describe('Slice 7 — provenance + no auto-CONNECTED_TO + Log metadata (GOAL-242
         // returns the same Document the entity was created from.
         const rows = await session.run(
           `
-          MATCH (p:Person {firstName: 'Prov', lastName: 'Subject'})-[:EXTRACTED_FROM]->(d:Document)
-          RETURN d.id AS id, d.filename AS filename
+          MATCH (p:Person {firstName: 'Prov', lastName: 'Subject'})-[:EXTRACTED_FROM]->(d:ResourcePulse)
+          RETURN d.id AS id, d.sourceFilename AS filename
           `
         )
         expect(rows.records).toHaveLength(1)
@@ -476,7 +476,7 @@ describe('deleteDocument resolver — permission gate + cleanup', () => {
     const session = driver.session()
     try {
       const rows = await session.run(
-        `MATCH (d:Document {id: $docId}) RETURN d.id AS id`,
+        `MATCH (d:ResourcePulse {id: $docId}) RETURN d.id AS id`,
         { docId }
       )
       expect(rows.records).toHaveLength(1)
@@ -529,7 +529,7 @@ describe('deleteDocument resolver — permission gate + cleanup', () => {
     const session = driver.session()
     try {
       const rows = await session.run(
-        `MATCH (d:Document {id: $docId}) RETURN d.id AS id`,
+        `MATCH (d:ResourcePulse {id: $docId}) RETURN d.id AS id`,
         { docId }
       )
       expect(rows.records).toHaveLength(0)

@@ -1,11 +1,15 @@
 import type { Driver } from 'neo4j-driver'
+import {
+  MATCH_SOURCE_RESOURCE_BY_ID,
+  QUEUE_ORDER_KEY,
+} from './source-resource-node'
 
 /**
  * GOAL-292 — the durable queue behind asynchronous document ingestion.
  *
- * `Document.status` *is* the queue. There is no separate job node: the
- * document already carries everything a worker needs (blobKey, mimeType,
- * userHint, parent FieldContext, uploader), so a second node would only
+ * `ingestStatus` *is* the queue. There is no separate job node: the resource
+ * already carries everything a worker needs (sourceBlobKey, sourceMimeType,
+ * sourceUserHint, parent FieldContext, uploader), so a second node would only
  * duplicate that state and invite the two to drift.
  *
  *   PENDING → PROCESSING → COMPLETE
@@ -15,10 +19,18 @@ import type { Driver } from 'neo4j-driver'
  * returns 202. `/api/cron/process-document-ingestion` claims PENDING rows,
  * runs the extraction pipeline, and lands them in COMPLETE or FAILED.
  *
- * Documents that predate this story have no `status` property at all. Every
- * read here coalesces a missing value to COMPLETE (per the story's Out of
- * Scope note) so the backlog is never re-ingested and the UI never shows an
- * old upload as stuck.
+ * GOAL-354 re-anchored all of this off the retired `:Document` node onto the
+ * `:ResourcePulse` a document now *is*. Two renames matter here: the queue
+ * column is `ingestStatus`, not `status` (ResourcePulse already has a `status`
+ * of its own with an unrelated meaning), and the staleness clock is
+ * `ingestStatusUpdatedAt`. Node addressing goes through
+ * `./source-resource-node` so the label pattern has one definition — see the
+ * note there on why the seek anchors on `:FieldPulse`.
+ *
+ * Documents that predate GOAL-292 have no status property at all. Every read
+ * here coalesces a missing value to COMPLETE (per the story's Out of Scope
+ * note) so the backlog is never re-ingested and the UI never shows an old
+ * upload as stuck.
  */
 
 export const DOCUMENT_INGEST_STATUS = {
@@ -117,11 +129,16 @@ export interface ClaimedDocument {
  * lingers until the 90-day purge, so counting it here would hold a permanent
  * slot against the uploader — twenty of them and they can never upload again.
  *
- * Shape: two index seeks unioned, then filtered. Anchoring on the *user*
- * instead makes this O(their lifetime uploads) — 4,031 dbHits at 2,000
- * documents, on every single upload — where the union is O(global queue depth)
- * at 118. The `collect`/`UNWIND` is a planner barrier: without it the EXISTS
- * predicates get pushed below the status seek and the cost returns.
+ * Shape: two index seeks unioned, then filtered — O(global queue depth), not
+ * O(the user's lifetime uploads). Re-measured against the ResourcePulse shape
+ * (25 in flight globally, 500 lifetime uploads for the user): this form is 249
+ * dbHits; anchoring on the *user* instead is 1,126 (+352%), because it expands
+ * every UPLOADED_BY edge before filtering. Still the right call.
+ *
+ * The `collect`/`UNWIND` planner barrier no longer changes the plan — with and
+ * without it the operators are identical (249 dbHits either way), where on the
+ * old `:Document` shape it was load-bearing. Kept because it is free and guards
+ * against a planner regression pushing the EXISTS predicates below the seek.
  */
 export async function countInFlightIngestsForUser(
   driver: Driver,
@@ -133,16 +150,16 @@ export async function countInFlightIngestsForUser(
       tx.run(
         `
         CALL {
-          MATCH (d:Document {status: $pending})    RETURN d
+          MATCH (d:ResourcePulse {ingestStatus: $pending})    RETURN d
           UNION
-          MATCH (d:Document {status: $processing}) RETURN d
+          MATCH (d:ResourcePulse {ingestStatus: $processing}) RETURN d
         }
         WITH collect(d) AS inFlightDocs
         UNWIND inFlightDocs AS d
         WITH d
         WHERE EXISTS { (d)-[:UPLOADED_BY]->(:Person:User {id: $userId}) }
           AND EXISTS {
-            MATCH (c:FieldContext)-[:HAS_DOCUMENT]->(d)
+            MATCH (c:FieldContext)-[:HAS_PULSE]->(d)
             WHERE c.deletedAt IS NULL
           }
         RETURN count(d) AS inFlight
@@ -179,13 +196,20 @@ export async function findPendingDocumentIds(
     const result = await session.executeRead(async (tx) =>
       tx.run(
         `
-        MATCH (c:FieldContext)-[:HAS_DOCUMENT]->(d:Document)
-        WHERE d.status = $pending
-          AND c.deletedAt IS NULL
-        // DISTINCT because nothing enforces one HAS_DOCUMENT edge per document:
+        // Written status-seek-first to say what it means: drain the queue, then
+        // find each candidate's context. Measured, the planner reaches the same
+        // plan from either formulation (86 dbHits, identical operators), so this
+        // is intent, not tuning. What actually matters is the
+        // resource_ingest_status index — without it BOTH forms degrade to a full
+        // ResourcePulse label scan (6,182 dbHits at 3k pulses), twice a minute
+        // forever. An EXISTS-subquery variant was measured 59% worse.
+        MATCH (d:ResourcePulse {ingestStatus: $pending})
+        MATCH (c:FieldContext)-[:HAS_PULSE]->(d)
+        WHERE c.deletedAt IS NULL
+        // DISTINCT because nothing enforces one HAS_PULSE edge per resource:
         // a second edge would otherwise return the same id twice and burn two of
         // the run's slots on one document.
-        RETURN DISTINCT d.id AS id, d.uploadedAt AS uploadedAt
+        RETURN DISTINCT d.id AS id, ${QUEUE_ORDER_KEY} AS uploadedAt
         ORDER BY uploadedAt ASC
         LIMIT toInteger($limit)
         `,
@@ -230,17 +254,17 @@ export async function claimDocumentForIngest(
     const result = await session.executeWrite(async (tx) =>
       tx.run(
         `
-        MATCH (d:Document {id: $documentId})
+${MATCH_SOURCE_RESOURCE_BY_ID}
         // Lock-forcing write only — deliberately a property nothing reads.
         SET d.ingestLockToken = randomUUID()
         WITH d
-        WHERE d.status = $pending
-        SET d.status = $processing,
-            d.statusUpdatedAt = datetime(),
-            d.statusMessage = null,
+        WHERE d.ingestStatus = $pending
+        SET d.ingestStatus = $processing,
+            d.ingestStatusUpdatedAt = datetime(),
+            d.ingestStatusMessage = null,
             d.ingestClaimedBy = $workerRunId,
             d.ingestAttempts = coalesce(d.ingestAttempts, 0) + 1
-        RETURN d.id AS id, d.filename AS filename
+        RETURN d.id AS id, d.sourceFilename AS filename
         `,
         {
           documentId,
@@ -295,10 +319,10 @@ export async function markDocumentIngestComplete(
     await session.executeWrite(async (tx) =>
       tx.run(
         `
-        MATCH (d:Document {id: $documentId})${CLAIM_FENCE}
-        SET d.status = $complete,
-            d.statusUpdatedAt = datetime(),
-            d.statusMessage = null,
+${MATCH_SOURCE_RESOURCE_BY_ID}${CLAIM_FENCE}
+        SET d.ingestStatus = $complete,
+            d.ingestStatusUpdatedAt = datetime(),
+            d.ingestStatusMessage = null,
             // toInteger: a plain JS number is encoded as a Float64, which
             // would store 3.0 for an int-declared property and render as
             // "3.0" anywhere it reaches copy.
@@ -333,10 +357,10 @@ export async function markDocumentIngestFailed(
     await session.executeWrite(async (tx) =>
       tx.run(
         `
-        MATCH (d:Document {id: $documentId})${CLAIM_FENCE}
-        SET d.status = $failed,
-            d.statusUpdatedAt = datetime(),
-            d.statusMessage = $statusMessage,
+${MATCH_SOURCE_RESOURCE_BY_ID}${CLAIM_FENCE}
+        SET d.ingestStatus = $failed,
+            d.ingestStatusUpdatedAt = datetime(),
+            d.ingestStatusMessage = $statusMessage,
             d.ingestClaimedBy = null
         `,
         {
@@ -374,20 +398,17 @@ export async function reclaimStalledIngests(
     const result = await session.executeWrite(async (tx) =>
       tx.run(
         `
-        MATCH (d:Document)
-        WHERE d.status = $processing
-          // A PROCESSING document with no clock is broken state by definition —
-          // treat it as stale. Without the IS NULL branch the comparison is
-          // null, it never matches, and the document spins forever: exactly the
-          // outcome this function exists to prevent.
-          AND (
-            d.statusUpdatedAt IS NULL
-            OR d.statusUpdatedAt < datetime() - duration({minutes: $staleMinutes})
-          )
+        MATCH (d:ResourcePulse {ingestStatus: $processing})
+        // A PROCESSING document with no clock is broken state by definition —
+        // treat it as stale. Without the IS NULL branch the comparison is null,
+        // it never matches, and the document spins forever: exactly the outcome
+        // this function exists to prevent.
+        WHERE d.ingestStatusUpdatedAt IS NULL
+           OR d.ingestStatusUpdatedAt < datetime() - duration({minutes: $staleMinutes})
         WITH d, coalesce(d.ingestAttempts, 0) >= $maxAttempts AS exhausted
-        SET d.status = CASE WHEN exhausted THEN $failed ELSE $pending END,
-            d.statusMessage = CASE WHEN exhausted THEN $abandonedMessage ELSE null END,
-            d.statusUpdatedAt = datetime(),
+        SET d.ingestStatus = CASE WHEN exhausted THEN $failed ELSE $pending END,
+            d.ingestStatusMessage = CASE WHEN exhausted THEN $abandonedMessage ELSE null END,
+            d.ingestStatusUpdatedAt = datetime(),
             d.ingestClaimedBy = null
         RETURN exhausted AS exhausted
         `,

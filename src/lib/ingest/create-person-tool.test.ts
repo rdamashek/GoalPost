@@ -9,7 +9,7 @@ import { initGraph } from '@/modules/graph'
  *
  *   - new node carries labels ["Person", "PersonPulse"]
  *   - (:FieldContext)-[:HAS_PERSON]->(:Person)
- *   - (:Person)-[:EXTRACTED_FROM]->(:Document) when documentId is provided
+ *   - (:Person)-[:EXTRACTED_FROM]->(:ResourcePulse) when documentId is provided
  *   - exactly one Log entry attributed to the uploader
  */
 
@@ -40,10 +40,10 @@ beforeAll(async () => {
       CREATE (u:Person:User {id: $userId, firstName: 'Test', lastName: 'Uploader', name: 'Test Uploader', createdAt: datetime()})
       CREATE (s:Space:MeSpace {id: $spaceId, name: 'Test MeSpace', visibility: 'PRIVATE', createdAt: datetime()})
       CREATE (c:FieldContext {id: $ctxId, title: 'Care Practices', createdAt: datetime()})
-      CREATE (d:Document {id: $docId, filename: 'meeting-notes.txt', mimeType: 'text/plain', sizeBytes: 42, uploadedAt: datetime()})
+      CREATE (d:FieldPulse:ResourcePulse {resourceType: 'document', title: 'meeting-notes.txt', content: 'fixture', createdAt: datetime(), id: $docId, sourceFilename: 'meeting-notes.txt', mimeType: 'text/plain', sizeBytes: 42, uploadedAt: datetime()})
       CREATE (u)-[:OWNS]->(s)
       CREATE (s)-[:HAS_CONTEXT]->(c)
-      CREATE (c)-[:HAS_DOCUMENT]->(d)
+      CREATE (c)-[:HAS_PULSE]->(d)
       CREATE (d)-[:UPLOADED_BY]->(u)
       `,
       {
@@ -116,7 +116,7 @@ describe('executeAuthorizedWriteTool — create_person', () => {
       const rows = await session.run(
         `
         MATCH (c:FieldContext {id: $ctxId})-[:HAS_PERSON]->(p:Person {id: $personId})
-        MATCH (p)-[:EXTRACTED_FROM]->(d:Document {id: $docId})
+        MATCH (p)-[:EXTRACTED_FROM]->(d:ResourcePulse {id: $docId})
         RETURN labels(p) AS labels, p.firstName AS firstName, p.lastName AS lastName, p.name AS name
         `,
         { ctxId: ids.fieldContext, personId, docId: ids.document }
@@ -197,7 +197,7 @@ describe('executeAuthorizedWriteTool — create_person', () => {
       const rows = await session.run(
         `
         MATCH (p:Person {id: $personId})
-        RETURN size([(p)-[:EXTRACTED_FROM]->(:Document) | 1]) AS extractedFromCount
+        RETURN size([(p)-[:EXTRACTED_FROM]->(:ResourcePulse) | 1]) AS extractedFromCount
         `,
         { personId }
       )
@@ -232,7 +232,7 @@ describe('executeAuthorizedWriteTool — create_person', () => {
       const linked = await session.run(
         `
         MATCH (c:FieldContext {id: $ctxId})-[:HAS_PERSON]->(u:Person {id: $userId})
-        MATCH (u)-[:EXTRACTED_FROM]->(d:Document {id: $docId})
+        MATCH (u)-[:EXTRACTED_FROM]->(d:ResourcePulse {id: $docId})
         RETURN u.id AS id
         `,
         { ctxId: ids.fieldContext, userId: ids.user, docId: ids.document }

@@ -335,6 +335,14 @@ interface CreatePulseInput extends ContextLocatorInput {
   why?: string
   location?: string
   time?: string
+  /**
+   * GOAL-355 — where the resource was *found* (a LinkedIn post, a newsletter),
+   * as distinct from `location`, which is the resource itself. Written by the
+   * bulk article import from the sheet's `source_url` column. A property of its
+   * own precisely so it survives the doc-ingest pass that may replace a
+   * placeholder `content` with an AI-generated summary.
+   */
+  sourceUrl?: string
   /** Optional source Document — when present, EXTRACTED_FROM edge is created (ADR-0002). */
   documentId?: string
   /** Optional ingest thread — slice 7: stamps the Log.metadata audit trail. */
@@ -379,7 +387,8 @@ async function lookupDocumentFilename(
 ): Promise<string | null> {
   try {
     const rows = await graph.query<{ filename: string | null }>(
-      `MATCH (d:Document {id: $documentId}) RETURN d.filename AS filename LIMIT 1`,
+      `MATCH (d:FieldPulse {id: $documentId}) WHERE d:ResourcePulse
+       RETURN d.sourceFilename AS filename LIMIT 1`,
       { documentId }
     )
     const value = rows?.[0]?.filename
@@ -1268,6 +1277,7 @@ async function createPulseAuthorized(
           p.why = coalesce(p.why, $why),
           p.location = coalesce(p.location, $location),
           p.time = coalesce(p.time, $time),
+          p.sourceUrl = coalesce(p.sourceUrl, $sourceUrl),
           p.updatedAt = datetime()
       CREATE (log:Log {
         id: $enrichLogId,
@@ -1299,6 +1309,7 @@ async function createPulseAuthorized(
         why: input.why?.trim() || null,
         location: input.location?.trim() || null,
         time: input.time?.trim() || null,
+        sourceUrl: input.sourceUrl?.trim() || null,
         enrichLogId,
         enrichDescription,
       }
@@ -1379,7 +1390,8 @@ async function createPulseAuthorized(
     // pre-verified above, but the guard ran in a separate transaction).
     OPTIONAL MATCH (author:Person {id: $authorId})
       WHERE EXISTS { (context)-[:HAS_PERSON]->(author) }
-    OPTIONAL MATCH (doc:Document {id: $documentId})
+    OPTIONAL MATCH (doc:FieldPulse {id: $documentId})
+      WHERE doc:ResourcePulse
     CREATE (pulse:FieldPulse${pulseLabel} {
       id: $pulseId,
       title: $title,
@@ -1410,6 +1422,9 @@ async function createPulseAuthorized(
     )
     FOREACH (_ IN CASE WHEN $time IS NULL THEN [] ELSE [1] END |
       SET pulse.time = $time
+    )
+    FOREACH (_ IN CASE WHEN $sourceUrl IS NULL THEN [] ELSE [1] END |
+      SET pulse.sourceUrl = $sourceUrl
     )
     CREATE (context)-[:HAS_PULSE]->(pulse)
     // Canonical author edge: the attributed person when one was verified
@@ -1467,6 +1482,7 @@ async function createPulseAuthorized(
     why: input.why?.trim() || null,
     location: input.location?.trim() || null,
     time: input.time?.trim() || null,
+    sourceUrl: input.sourceUrl?.trim() || null,
   })
 
   if (!rows || rows.length === 0) {
@@ -1671,7 +1687,8 @@ async function createPersonAuthorized(
       `
       MATCH (c:FieldContext {id: $contextId})
       MATCH (u:Person {id: $currentUserId})
-      OPTIONAL MATCH (d:Document {id: $documentId})
+      OPTIONAL MATCH (d:FieldPulse {id: $documentId})
+        WHERE d:ResourcePulse
       MERGE (c)-[hp:HAS_PERSON]->(u)
       // GOAL-346: this is the acting user's OWN account being linked to the
       // field they uploaded into — an identity attach, not an extracted
@@ -1815,7 +1832,8 @@ async function createPersonAuthorized(
     `
     MATCH (c:FieldContext {id: $contextId})
     MATCH (u:Person {id: $currentUserId})
-    OPTIONAL MATCH (d:Document {id: $documentId})
+    OPTIONAL MATCH (d:FieldPulse {id: $documentId})
+      WHERE d:ResourcePulse
     CREATE (p:Person:PersonPulse {
       id: $personId,
       firstName: $firstName,
@@ -1997,7 +2015,8 @@ async function updatePersonAuthorized(
     `
     MATCH (p:Person {id: $personId})
     MATCH (u:Person {id: $currentUserId})
-    OPTIONAL MATCH (d:Document {id: $documentId})
+    OPTIONAL MATCH (d:FieldPulse {id: $documentId})
+      WHERE d:ResourcePulse
     FOREACH (_ IN CASE WHEN $newFirstName IS NULL THEN [] ELSE [1] END |
       SET p.firstName = $newFirstName
     )
@@ -2257,7 +2276,8 @@ async function createOrganizationAuthorized(
       `
       MATCH (o:Organization {id: $existingId})
       MATCH (u:Person {id: $currentUserId})
-      OPTIONAL MATCH (d:Document {id: $documentId})
+      OPTIONAL MATCH (d:FieldPulse {id: $documentId})
+        WHERE d:ResourcePulse
       FOREACH (_ IN CASE WHEN $setDescription THEN [1] ELSE [] END |
         SET o.description = $orgDescription
       )
@@ -2310,7 +2330,8 @@ async function createOrganizationAuthorized(
     `
     MATCH (c:FieldContext {id: $contextId})
     MATCH (u:Person {id: $currentUserId})
-    OPTIONAL MATCH (d:Document {id: $documentId})
+    OPTIONAL MATCH (d:FieldPulse {id: $documentId})
+      WHERE d:ResourcePulse
     CREATE (o:Organization:LifeSensor:RelationalEntity {
       id: $organizationId,
       name: $name,
@@ -3491,7 +3512,8 @@ export async function executeAuthorizedWriteTool(
         `
         MATCH (pulse:FieldPulse {id: $pulseId})
         MATCH (u:Person {id: $currentUserId})
-        OPTIONAL MATCH (d:Document {id: $documentId})
+        OPTIONAL MATCH (d:FieldPulse {id: $documentId})
+          WHERE d:ResourcePulse
         CREATE (log:Log {
           id: $logId,
           description: $description,

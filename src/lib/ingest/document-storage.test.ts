@@ -112,8 +112,8 @@ describe('DocumentStorage — uploadDocument', () => {
     try {
       const rows = await session.run(
         `
-        MATCH (c:FieldContext {id: $ctxId})-[:HAS_DOCUMENT]->(d:Document {id: $docId})-[:UPLOADED_BY]->(u:Person:User {id: $userId})
-        RETURN d.id AS id, d.filename AS filename, d.mimeType AS mimeType, d.sizeBytes AS sizeBytes, d.blobKey AS blobKey, d.uploadedAt AS uploadedAt
+        MATCH (c:FieldContext {id: $ctxId})-[:HAS_PULSE]->(d:ResourcePulse {id: $docId})-[:UPLOADED_BY]->(u:Person:User {id: $userId})
+        RETURN d.id AS id, d.sourceFilename AS filename, d.sourceMimeType AS mimeType, d.sourceSizeBytes AS sizeBytes, d.sourceBlobKey AS blobKey, d.uploadedAt AS uploadedAt
         `,
         { ctxId: ids.fieldContext, docId, userId: ids.user }
       )
@@ -149,7 +149,7 @@ describe('DocumentStorage — uploadDocument', () => {
 
     const session = driver.session()
     try {
-      const rows = await session.run(`MATCH (d:Document {id: $docId}) RETURN d`, { docId })
+      const rows = await session.run(`MATCH (d:ResourcePulse {id: $docId}) RETURN d`, { docId })
       expect(rows.records).toHaveLength(0)
     } finally {
       await session.close()
@@ -180,7 +180,7 @@ describe('DocumentStorage — uploadDocument', () => {
     try {
       await session.run(
         `
-        MATCH (d:Document {id: $docId})
+        MATCH (d:ResourcePulse {id: $docId})
         MATCH (c:FieldContext {id: $ctxId})
         CREATE (p:Person:PersonPulse {id: $personId, firstName: 'Sarah', lastName: 'Chen', createdAt: datetime()})
         CREATE (c)-[:HAS_PERSON]->(p)
@@ -200,7 +200,7 @@ describe('DocumentStorage — uploadDocument', () => {
     const verify = driver.session()
     try {
       const docGone = await verify.run(
-        `MATCH (d:Document {id: $docId}) RETURN d`,
+        `MATCH (d:ResourcePulse {id: $docId}) RETURN d`,
         { docId }
       )
       expect(docGone.records).toHaveLength(0)
@@ -245,7 +245,7 @@ describe('DocumentStorage — uploadDocument', () => {
     expect(leakedBlob).toBe(0)
     const session = driver.session()
     try {
-      const rows = await session.run(`MATCH (d:Document {id: $docId}) RETURN d`, { docId })
+      const rows = await session.run(`MATCH (d:ResourcePulse {id: $docId}) RETURN d`, { docId })
       expect(rows.records).toHaveLength(0)
     } finally {
       await session.close()

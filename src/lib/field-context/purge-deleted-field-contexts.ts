@@ -130,6 +130,10 @@ export async function purgeDeletedFieldContexts(
           WITH c, pulses, ctxLinks, collect(DISTINCT ctxSug) AS ctxSugs
           OPTIONAL MATCH (c)-[:HAS_WEAVE]->(weave:PromiseWeave)
           WITH c, pulses, ctxLinks, ctxSugs, collect(DISTINCT weave) AS weaves
+          // GOAL-354: documents are ResourcePulses and are already collected by
+          // the pulses branch above. This legacy branch stays only so a
+          // pre-migration environment still purges its :Document nodes and
+          // their blobs; it yields nothing once the migration has run.
           OPTIONAL MATCH (c)-[:HAS_DOCUMENT]->(doc:Document)
           WITH c, pulses, ctxLinks, ctxSugs, weaves, collect(DISTINCT doc) AS docs
           // Queued/finished bulk-import jobs (GOAL-326). They belong to this
@@ -161,7 +165,18 @@ export async function purgeDeletedFieldContexts(
                ctxSugs + [x IN pulseConns WHERE x:ResonanceSuggestion AND NOT x IN ctxSugs] AS sugs
           WITH c, pulses, weaves, docs, importJobs, orphanOrgs, chunks, links, sugs,
                c.title AS title,
-               [d IN docs WHERE d.blobKey IS NOT NULL | d.blobKey] AS blobKeys
+               // GOAL-354: a document is a ResourcePulse, so its blob key lives
+               // on the pulse as sourceBlobKey and it is collected by the
+               // pulses branch above, not by docs. Reading only docs here
+               // would silently stop cleaning up S3 the moment the migration
+               // runs — the purge would delete the graph node and leave the
+               // file behind forever, which is the retention guarantee this
+               // cron exists to honour. The legacy docs branch is kept until
+               // the Document type is retired so a pre-migration environment
+               // still cleans up.
+               [d IN docs WHERE d.blobKey IS NOT NULL | d.blobKey]
+                 + [p IN pulses WHERE p.sourceBlobKey IS NOT NULL | p.sourceBlobKey]
+                 AS blobKeys
           FOREACH (n IN chunks | DETACH DELETE n)
           FOREACH (n IN links | DETACH DELETE n)
           FOREACH (n IN sugs | DETACH DELETE n)

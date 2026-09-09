@@ -211,7 +211,7 @@ export const StudioChrome: FC = () => {
                 </Avatar>
               </button>
               {showUserMenu && (
-                <div className="absolute right-0 mt-2 w-64 rounded-2xl bg-white dark:bg-black/90 border border-gp-glass-border shadow-xl py-2 z-50">
+                <div className="absolute right-0 mt-2 w-64 rounded-2xl bg-gp-surface-strong border border-gp-glass-border shadow-xl py-2 z-50">
                   <div className="px-4 py-3 border-b border-gp-glass-border">
                     <p className="text-sm font-semibold text-gp-ink-strong dark:text-gp-ink-strong">
                       {displayName}

@@ -25,11 +25,33 @@ export interface NvlRefHandle {
   getPan: () => { x: number; y: number }
   /** Sets the viewport pan in world coordinates. */
   setPan: (panX: number, panY: number) => void
-  /** Hit-tests a pointer position against nodes/relationships (touch pan gating). */
+  /**
+   * Hit-tests a pointer position against nodes/relationships (touch pan
+   * gating, touch node drag). Node hits carry the node's own world position in
+   * `targetCoordinates`, which is where a drag starts from.
+   */
   getHits: (
     evt: { clientX: number; clientY: number },
     targets?: ('node' | 'relationship')[]
-  ) => { nvlTargets: { nodes: unknown[]; relationships: unknown[] } }
+  ) => {
+    nvlTargets: {
+      nodes: Array<{
+        data?: { id?: string | number }
+        targetCoordinates?: { x: number; y: number }
+      }>
+      relationships: unknown[]
+    }
+  }
+  /**
+   * Moves nodes in world space. `pinned` keeps the force simulation from
+   * pulling a dropped node back to where it was. Argument names mirror NVL's
+   * own `setNodePositions(data, updateLayout?)` — this interface is a
+   * hand-maintained mirror that nothing type-checks against upstream.
+   */
+  setNodePositions: (
+    positions: Array<{ id: string; x: number; y: number; pinned?: boolean }>,
+    updateLayout?: boolean
+  ) => void
   fit: (nodeIds: string[], opts?: Record<string, unknown>) => void
   getNodes: () => Node[]
   /** Re-kicks the layout simulation. Required after mount because NVL's force layout doesn't always converge from a cold start without an explicit nudge. */

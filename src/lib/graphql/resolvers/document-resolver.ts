@@ -6,6 +6,7 @@ import { handleReExtractDocument } from '@/lib/ingest/handle-reextract-document'
 import { runContextResonanceDiscovery } from '@/lib/resonance/discovery/on-upload-discovery'
 import { createOpenAIExtractionModelClient } from '@/lib/ingest/openai-extraction-model-client'
 import { createGeminiExtractionModelClient } from '@/lib/ingest/gemini-extraction-model-client'
+import { RESOURCE_TYPE_DOCUMENT } from '@/lib/ingest/source-resource-node'
 import {
   createOpenAIDocumentSummarizer,
   createGeminiDocumentSummarizer,
@@ -194,7 +195,7 @@ export const documentTypeResolvers = {
       const result = await session.executeRead(async (tx) =>
         tx.run(
           `
-          MATCH (p:Person)-[:EXTRACTED_FROM]->(d:Document {id: $documentId})
+          MATCH (p:Person)-[:EXTRACTED_FROM]->(d:ResourcePulse {id: $documentId})
           RETURN p.id AS id, p.firstName AS firstName, p.lastName AS lastName
           ORDER BY p.firstName ASC
           `,
@@ -220,7 +221,7 @@ export const documentTypeResolvers = {
       const result = await session.executeRead(async (tx) =>
         tx.run(
           `
-          MATCH (p:FieldPulse)-[:EXTRACTED_FROM]->(d:Document {id: $documentId})
+          MATCH (p:FieldPulse)-[:EXTRACTED_FROM]->(d:ResourcePulse {id: $documentId})
           RETURN p.id AS id, p.title AS title, labels(p) AS labels
           ORDER BY p.title ASC
           `,
@@ -252,7 +253,7 @@ export const documentTypeResolvers = {
       const result = await session.executeRead(async (tx) =>
         tx.run(
           `
-          MATCH (d:Document {id: $documentId})-[:HAS_INGEST_THREAD]->(t:ConversationThread)
+          MATCH (d:ResourcePulse {id: $documentId})-[:HAS_INGEST_THREAD]->(t:ConversationThread)
           RETURN t.id AS id, t.title AS title, toString(t.createdAt) AS createdAt
           ORDER BY t.createdAt DESC
           `,
@@ -320,29 +321,34 @@ export const documentQueries = {
           OPTIONAL MATCH (space)-[:HAS_MEMBER]->(:SpaceMembership)-[:IS_MEMBER]->(member:Person {id: $userId})
           WITH c, (owner IS NOT NULL OR member IS NOT NULL) AS allowed
           WHERE allowed
-          MATCH (c)-[:HAS_DOCUMENT]->(d:Document)
+          // GOAL-354: a document is a ResourcePulse. HAS_PULSE reaches every
+          // pulse in the context, so the resourceType predicate is what keeps
+          // this list to documents rather than every resource in the field.
+          MATCH (c)-[:HAS_PULSE]->(d:ResourcePulse)
+          WHERE d.resourceType = $resourceType
           RETURN
             d.id AS id,
-            d.filename AS filename,
-            d.mimeType AS mimeType,
-            d.sizeBytes AS sizeBytes,
-            d.pageCount AS pageCount,
-            d.userHint AS userHint,
-            d.summary AS summary,
-            d.concepts AS concepts,
-            toString(d.uploadedAt) AS uploadedAt,
+            d.sourceFilename AS filename,
+            d.sourceMimeType AS mimeType,
+            d.sourceSizeBytes AS sizeBytes,
+            d.sourcePageCount AS pageCount,
+            d.sourceUserHint AS userHint,
+            d.sourceSummary AS summary,
+            d.sourceConcepts AS concepts,
+            toString(coalesce(d.uploadedAt, d.createdAt)) AS uploadedAt,
             // Documents predating GOAL-292 carry no status; they are finished
             // uploads, so they read back COMPLETE rather than looking stuck.
-            coalesce(d.status, $completeStatus) AS status,
-            d.statusMessage AS statusMessage,
+            coalesce(d.ingestStatus, $completeStatus) AS status,
+            d.ingestStatusMessage AS statusMessage,
             d.ingestCreatedEntityCount AS ingestCreatedEntityCount,
             d.ingestFailedEntityCount AS ingestFailedEntityCount
-          ORDER BY d.uploadedAt DESC
+          ORDER BY coalesce(d.uploadedAt, d.createdAt) DESC
           `,
           {
             fieldContextId: args.fieldContextId,
             userId,
             completeStatus: DOCUMENT_INGEST_STATUS.complete,
+            resourceType: RESOURCE_TYPE_DOCUMENT,
           }
         )
       )

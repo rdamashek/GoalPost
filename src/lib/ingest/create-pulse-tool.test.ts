@@ -9,7 +9,7 @@ import { initGraph } from '@/modules/graph'
  *
  *   - new node carries labels ["FieldPulse", "<GoalPulse|ResourcePulse|StoryPulse>"]
  *   - (:FieldContext)-[:HAS_PULSE]->(:FieldPulse)
- *   - (:FieldPulse)-[:EXTRACTED_FROM]->(:Document) when documentId is provided
+ *   - (:FieldPulse)-[:EXTRACTED_FROM]->(:ResourcePulse) when documentId is provided
  *   - exactly one Log entry attributed to the uploader (parity with create_person)
  */
 
@@ -47,13 +47,13 @@ beforeAll(async () => {
       CREATE (u:Person:User {id: $userId, firstName: 'Test', lastName: 'Uploader', name: 'Test Uploader', createdAt: datetime()})
       CREATE (s:Space:MeSpace {id: $spaceId, name: 'Test MeSpace', visibility: 'PRIVATE', createdAt: datetime()})
       CREATE (c:FieldContext {id: $ctxId, title: 'Care Practices', createdAt: datetime()})
-      CREATE (d:Document {id: $docId, filename: 'meeting-notes.txt', mimeType: 'text/plain', sizeBytes: 42, uploadedAt: datetime()})
+      CREATE (d:FieldPulse:ResourcePulse {resourceType: 'document', title: 'meeting-notes.txt', content: 'fixture', createdAt: datetime(), id: $docId, sourceFilename: 'meeting-notes.txt', mimeType: 'text/plain', sizeBytes: 42, uploadedAt: datetime()})
       CREATE (ap:Person:PersonPulse {id: $attachedPersonId, firstName: 'Nadia', lastName: 'Woods', name: 'Nadia Woods', createdAt: datetime()})
       CREATE (ap2:Person:PersonPulse {id: $attachedPerson2Id, firstName: 'Priya', lastName: 'Raman', name: 'Priya Raman', createdAt: datetime()})
       CREATE (up:Person:PersonPulse {id: $unattachedPersonId, firstName: 'Omar', lastName: 'Haddad', name: 'Omar Haddad', createdAt: datetime()})
       CREATE (u)-[:OWNS]->(s)
       CREATE (s)-[:HAS_CONTEXT]->(c)
-      CREATE (c)-[:HAS_DOCUMENT]->(d)
+      CREATE (c)-[:HAS_PULSE]->(d)
       CREATE (d)-[:UPLOADED_BY]->(u)
       CREATE (c)-[:HAS_PERSON]->(ap)
       CREATE (c)-[:HAS_PERSON]->(ap2)
@@ -134,7 +134,7 @@ describe('executeAuthorizedWriteTool — create_pulse (slice 2)', () => {
         const rows = await session.run(
           `
           MATCH (c:FieldContext {id: $ctxId})-[:HAS_PULSE]->(p:FieldPulse {id: $pulseId})
-          MATCH (p)-[:EXTRACTED_FROM]->(d:Document {id: $docId})
+          MATCH (p)-[:EXTRACTED_FROM]->(d:ResourcePulse {id: $docId})
           RETURN labels(p) AS labels, p.title AS title, p.content AS content, p.horizon AS horizon
           `,
           { ctxId: ids.fieldContext, pulseId, docId: ids.document }
@@ -192,7 +192,7 @@ describe('executeAuthorizedWriteTool — create_pulse (slice 2)', () => {
       try {
         const rows = await session.run(
           `
-          MATCH (p:FieldPulse {id: $pulseId})-[:EXTRACTED_FROM]->(d:Document {id: $docId})
+          MATCH (p:FieldPulse {id: $pulseId})-[:EXTRACTED_FROM]->(d:ResourcePulse {id: $docId})
           RETURN labels(p) AS labels, p.resourceType AS resourceType
           `,
           { pulseId, docId: ids.document }
@@ -232,7 +232,7 @@ describe('executeAuthorizedWriteTool — create_pulse (slice 2)', () => {
           `
           MATCH (p:FieldPulse {id: $pulseId})
           RETURN labels(p) AS labels,
-                 size([(p)-[:EXTRACTED_FROM]->(:Document) | 1]) AS extractedFromCount
+                 size([(p)-[:EXTRACTED_FROM]->(:ResourcePulse) | 1]) AS extractedFromCount
           `,
           { pulseId }
         )

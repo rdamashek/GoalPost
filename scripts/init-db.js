@@ -298,6 +298,26 @@ async function initializeDatabase() {
       // A composite (status, uploadedAt) was tried and the planner ignored it.
       `CREATE INDEX document_status IF NOT EXISTS
        FOR (d:Document) ON (d.status)`,
+      // GOAL-354: the same queue, re-anchored. A document is a Resource, so the
+      // ingest lifecycle now lives on `ResourcePulse.ingestStatus` (renamed off
+      // `status`, which ResourcePulse already uses for the pulse's own,
+      // unrelated status). The cron's seek is unchanged in shape but the label
+      // it scans is larger — there are ~5x more ResourcePulses than there were
+      // Documents — so this index matters strictly more than the one above, not
+      // less. `document_status` stays until the Document type is retired.
+      `CREATE INDEX resource_ingest_status IF NOT EXISTS
+       FOR (r:ResourcePulse) ON (r.ingestStatus)`,
+      // GOAL-354: the bulk article import's idempotency check (one FieldContext
+      // never fetches the same article twice, `findArticleDocument`) matches
+      // sourceUrl once per import row. It used to reach only documents via
+      // HAS_DOCUMENT; a document is a Resource now, so it expands HAS_PULSE and
+      // touches EVERY pulse in the context. Measured on a 2,000-pulse context:
+      // 4,107 dbHits per row without this index (Expand + Filter over the whole
+      // context) vs 10 with it — a 300-row job goes from ~1.23M dbHits to
+      // ~3,000. Scales as 2x the pulses in the context, so it gets worse as
+      // fields grow.
+      `CREATE INDEX resource_source_url IF NOT EXISTS
+       FOR (r:ResourcePulse) ON (r.sourceUrl)`,
       // GOAL-326: same story for the bulk-article-import queue. The one-minute
       // cron seeks PENDING (findPendingArticleImportJobIds) and PROCESSING
       // (reclaimStalledArticleImports) on every tick, and the enqueue path

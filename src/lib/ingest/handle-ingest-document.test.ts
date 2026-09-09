@@ -60,7 +60,7 @@ afterAll(async () => {
       { userId: ids.user }
     )
     await session.run(
-      `MATCH (c:FieldContext {id: $ctxId})-[:HAS_DOCUMENT]->(d:Document) DETACH DELETE d`,
+      `MATCH (c:FieldContext {id: $ctxId})-[:HAS_PULSE]->(d:ResourcePulse) DETACH DELETE d`,
       { ctxId: ids.fieldContext }
     )
     await session.run(
@@ -124,8 +124,8 @@ describe('handleIngestDocument — end-to-end orchestration (Slice 1)', () => {
     try {
       // Document anchored
       const docRows = await session.run(
-        `MATCH (c:FieldContext {id: $ctxId})-[:HAS_DOCUMENT]->(d:Document {id: $docId})-[:UPLOADED_BY]->(u:Person {id: $userId})
-         RETURN d.filename AS filename`,
+        `MATCH (c:FieldContext {id: $ctxId})-[:HAS_PULSE]->(d:ResourcePulse {id: $docId})-[:UPLOADED_BY]->(u:Person {id: $userId})
+         RETURN d.sourceFilename AS filename`,
         { ctxId: ids.fieldContext, docId: result.documentId, userId: ids.user }
       )
       expect(docRows.records).toHaveLength(1)
@@ -136,7 +136,7 @@ describe('handleIngestDocument — end-to-end orchestration (Slice 1)', () => {
       const personRows = await session.run(
         `
         MATCH (c:FieldContext {id: $ctxId})-[:HAS_PERSON]->(p:Person:PersonPulse {firstName: 'Sarah', lastName: 'Chen'})
-        MATCH (p)-[:EXTRACTED_FROM]->(d:Document {id: $docId})
+        MATCH (p)-[:EXTRACTED_FROM]->(d:ResourcePulse {id: $docId})
         RETURN p.id AS personId
         `,
         { ctxId: ids.fieldContext, docId: result.documentId }
@@ -212,7 +212,7 @@ describe('handleIngestDocument — end-to-end orchestration (Slice 1)', () => {
     try {
       // Document still persists
       const docRows = await session.run(
-        `MATCH (d:Document {id: $docId}) RETURN d.filename AS filename`,
+        `MATCH (d:ResourcePulse {id: $docId}) RETURN d.sourceFilename AS filename`,
         { docId: result.documentId }
       )
       expect(docRows.records).toHaveLength(1)
@@ -270,7 +270,7 @@ describe('handleIngestDocument — end-to-end orchestration (Slice 1)', () => {
       try {
         // Document persists even though nothing was extracted.
         const docRows = await session.run(
-          `MATCH (d:Document {id: $docId}) RETURN d.filename AS filename`,
+          `MATCH (d:ResourcePulse {id: $docId}) RETURN d.sourceFilename AS filename`,
           { docId: result.documentId }
         )
         expect(docRows.records).toHaveLength(1)
@@ -329,8 +329,8 @@ describe('handleIngestDocument — end-to-end orchestration (Slice 1)', () => {
       const session = driver.session()
       try {
         const rows = await session.run(
-          `MATCH (d:Document {id: $docId})
-           RETURN d.summary AS summary, d.concepts AS concepts`,
+          `MATCH (d:ResourcePulse {id: $docId})
+           RETURN d.sourceSummary AS summary, d.sourceConcepts AS concepts`,
           { docId: result.documentId }
         )
         expect(rows.records).toHaveLength(1)
@@ -379,8 +379,8 @@ describe('handleIngestDocument — end-to-end orchestration (Slice 1)', () => {
       const session = driver.session()
       try {
         const rows = await session.run(
-          `MATCH (d:Document {id: $docId})
-           RETURN d.summary AS summary, d.concepts AS concepts`,
+          `MATCH (d:ResourcePulse {id: $docId})
+           RETURN d.sourceSummary AS summary, d.sourceConcepts AS concepts`,
           { docId: result.documentId }
         )
         expect(rows.records).toHaveLength(1)
@@ -590,7 +590,7 @@ describe('handleIngestDocument — end-to-end orchestration (Slice 1)', () => {
           `
           MATCH (c:FieldContext {id: $ctxId})-[:HAS_PERSON]->(p:Person:PersonPulse)
           WHERE p.firstName IN ['Amelia', 'Diego']
-          MATCH (p)-[:EXTRACTED_FROM]->(d:Document {id: $docId})
+          MATCH (p)-[:EXTRACTED_FROM]->(d:ResourcePulse {id: $docId})
           RETURN p.firstName AS firstName, p.lastName AS lastName
           ORDER BY p.firstName ASC
           `,
@@ -603,7 +603,7 @@ describe('handleIngestDocument — end-to-end orchestration (Slice 1)', () => {
         const pulseRows = await session.run(
           `
           MATCH (c:FieldContext {id: $ctxId})-[:HAS_PULSE]->(p:FieldPulse)
-          MATCH (p)-[:EXTRACTED_FROM]->(d:Document {id: $docId})
+          MATCH (p)-[:EXTRACTED_FROM]->(d:ResourcePulse {id: $docId})
           RETURN p.title AS title, labels(p) AS labels
           ORDER BY p.title ASC
           `,
@@ -733,7 +733,7 @@ describe('handleIngestDocument — end-to-end orchestration (Slice 1)', () => {
       try {
         const rows = await session.run(
           `
-          MATCH (c:FieldContext {id: $ctxId})-[:HAS_PULSE]->(p:FieldPulse)-[:EXTRACTED_FROM]->(d:Document {id: $docId})
+          MATCH (c:FieldContext {id: $ctxId})-[:HAS_PULSE]->(p:FieldPulse)-[:EXTRACTED_FROM]->(d:ResourcePulse {id: $docId})
           MATCH (p)-[:INITIATED_BY]->(author)
           RETURN p.title AS title, author.id AS authorId,
                  size([(p)-[:INITIATED_BY]->() | 1]) AS initiatedByCount
@@ -755,7 +755,7 @@ describe('handleIngestDocument — end-to-end orchestration (Slice 1)', () => {
         // and carries the attribution by name only.
         const logRows = await session.run(
           `
-          MATCH (log:Log)-[:LOGGED_FOR]->(p:FieldPulse)-[:EXTRACTED_FROM]->(d:Document {id: $docId})
+          MATCH (log:Log)-[:LOGGED_FOR]->(p:FieldPulse)-[:EXTRACTED_FROM]->(d:ResourcePulse {id: $docId})
           MATCH (log)-[:CREATED_BY]->(creator)
           RETURN creator.id AS creatorId, log.description AS description
           `,

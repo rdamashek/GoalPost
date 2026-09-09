@@ -490,7 +490,7 @@ type Person implements PersonInterface
   @authorization directive, so non-members of the parent Space see an empty list even if
   the underlying EXTRACTED_FROM edge exists.
   """
-  extractedFrom: [Document!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  extractedFrom: [ResourcePulse!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
   """
   Pulses (goal/resource/story) this person was identified as related to / named
   in but is not the author of (GOAL-298, MENTIONED_IN). Each FieldPulse is
@@ -1223,7 +1223,9 @@ type FieldContext
       nestedOperations: [DISCONNECT]
     )
   pulses: [FieldPulse!]! @relationship(type: "HAS_PULSE", direction: OUT)
-  documents: [Document!]! @relationship(type: "HAS_DOCUMENT", direction: OUT)
+  """Document-backed resources in this context. HAS_PULSE reaches every pulse;
+  the Document type's own READ filter narrows it to `resourceType: "document"`."""
+  documents: [Document!]! @relationship(type: "HAS_PULSE", direction: OUT)
   resonances: [ResonanceLink!]!
     @relationship(type: "HAS_RESONANCE", direction: OUT)
   # Read-only from this side. Weaves are authored through the PromiseWeave
@@ -1313,7 +1315,19 @@ Documents are never auto-deleted; cleanup is user-driven (slice 6 ships the
 delete mutation).
 """
 type Document
-  @node(labels: ["Document"])
+  # GOAL-354: `Document` is no longer its own node — a document IS a Resource.
+  # This type is now a READ PROJECTION over document-backed ResourcePulses:
+  # same field names the UI already consumes, `@alias`ed onto the `source*` /
+  # `ingest*` properties the pulse actually carries. Keeping the projection is
+  # what let the ingest remodel land without rewriting the document UI in the
+  # same change; the UI migrating to ResourcePulse directly is a later slice,
+  # after which this type goes away.
+  #
+  # The label alone would match EVERY ResourcePulse, so the READ filter below
+  # additionally requires `resourceType: "document"`. That predicate is the only
+  # thing separating this type from ordinary resources — it must stay ANDed
+  # around the Space check, never ORed beside it.
+  @node(labels: ["ResourcePulse"])
   # No generated CRUD (GOAL-292). Every Document write goes through a purpose-
   # built path that owns an invariant the generic mutations cannot: the REST
   # presign/process flow (anchors with a server-minted id + PENDING status), the
@@ -1326,11 +1340,17 @@ type Document
   # and re-point `uploadedBy` so the worker ran as somebody else.
   @mutation(operations: [])
   @authorization(
-    # READ — inherits from the parent FieldContext / Space.
+    # READ — inherits from the parent FieldContext / Space, AND is restricted to
+    # document-backed resources (GOAL-354). Without the resourceType predicate
+    # every generated read on this type — `documents(where: …)`, and the
+    # `FieldContext.documents` traversal — would return ordinary member-authored
+    # resources projected through document field names, i.e. rows with a null
+    # filename and a download link to nothing.
     filter: [
       {
         where: {
           node: {
+            resourceType_EQ: "document"
             fieldContext_SOME: {
               OR: [
                 { meSpace_SOME: { owner_SOME: { id_EQ: "$jwt.user.id" } } }
@@ -1380,23 +1400,29 @@ type Document
     ]
   ) {
   id: ID! @id
-  filename: String!
-  mimeType: String!
-  sizeBytes: Int!
+  """Always "document" — the predicate that separates this projection from
+  ordinary resources. Declared because the READ filter above has to reference
+  it; an @authorization filter can only name fields the type declares."""
+  resourceType: String!
+  filename: String! @alias(property: "sourceFilename")
+  mimeType: String! @alias(property: "sourceMimeType")
+  sizeBytes: Int! @alias(property: "sourceSizeBytes")
   """Page count for paginated formats (.pdf). 1 for .txt/.md. Null when unknown (legacy uploads)."""
-  pageCount: Int
+  pageCount: Int @alias(property: "sourcePageCount")
   """Blob storage key. Internal — UI surfaces filename instead. Never exposed
   to any client: `@selectable(onRead: false)` removes it from read selection
   sets and `@filterable(byValue: false)` blocks value inference via filters
   (GOAL-302). The download route reads it server-side over raw Cypher, so the
   file stays reachable to members through the opaque `downloadUrl` only."""
   blobKey: String
+    @alias(property: "sourceBlobKey")
     @selectable(onRead: false, onAggregate: false)
     @filterable(byValue: false, byAggregate: false)
   """Provider-issued URL for the blob. May be expiring/private — never returned
   to a client (GOAL-302); members open the file through `downloadUrl`. Same
   non-selectable / non-filterable gate as `blobKey`."""
   blobUrl: String
+    @alias(property: "sourceBlobUrl")
     @selectable(onRead: false, onAggregate: false)
     @filterable(byValue: false, byAggregate: false)
   """Durable, Space-scoped in-app link to open/download the uploaded file
@@ -1407,7 +1433,7 @@ type Document
   Space. Computed from the document id (see documentTypeResolvers.downloadUrl)."""
   downloadUrl: String @customResolver(requires: "id")
   """Optional one-line "What is this?" hint captured at upload. Reused on re-extract (slice 6)."""
-  userHint: String
+  userHint: String @alias(property: "sourceUserHint")
   """Public link this document was fetched from, when it was not uploaded by a
   member but read server-side by the bulk article import (GOAL-344). Null for
   uploads. Read-only: the worker stamps it at anchor time."""
@@ -1416,24 +1442,28 @@ type Document
   ingest time by a dedicated summarization call (independent of the entity
   extraction model). Null if the call failed or was skipped — document still
   lands either way (failure is non-fatal). Refreshed on re-extract."""
-  summary: String
+  summary: String @alias(property: "sourceSummary")
   """Up to ~5 short concept phrases the AI surfaced as the document's
   high-level themes. Rendered as chips on the Document card so the user can
   see what the doc is *about* before scanning extracted entities. Empty when
   the summarizer returned nothing or the call failed."""
-  concepts: [String!]
+  concepts: [String!] @alias(property: "sourceConcepts")
   """Ingest lifecycle (GOAL-292): PENDING → PROCESSING → COMPLETE / FAILED.
   The upload route anchors PENDING and returns 202; the
   /api/cron/process-document-ingestion worker transitions the rest. The upload
   UI polls this to show queued/processing/failed instead of blocking on a
   synchronous response. Documents uploaded before GOAL-292 have no stored value
   and read back as COMPLETE, so an old upload never looks stuck."""
-  status: String @settable(onCreate: false, onUpdate: false)
+  status: String
+    @alias(property: "ingestStatus")
+    @settable(onCreate: false, onUpdate: false)
   """Member-safe explanation when `status` is FAILED — safe to render verbatim
   (kb/07 Rule 1: raw driver/model error text is logged server-side only). Null
   in every other state. The file and its Document row both survive a failure,
   so Re-extract stays the recovery path."""
-  statusMessage: String @settable(onCreate: false, onUpdate: false)
+  statusMessage: String
+    @alias(property: "ingestStatusMessage")
+    @settable(onCreate: false, onUpdate: false)
   """Entities the ingest run wrote into the graph. Populated when `status`
   reaches COMPLETE; the upload UI reports it in the success toast."""
   ingestCreatedEntityCount: Int @settable(onCreate: false, onUpdate: false)
@@ -1441,7 +1471,7 @@ type Document
   success is normal and is detailed in the ingest thread."""
   ingestFailedEntityCount: Int @settable(onCreate: false, onUpdate: false)
   uploadedAt: DateTime!
-  fieldContext: [FieldContext!]! @relationship(type: "HAS_DOCUMENT", direction: IN)
+  fieldContext: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)
   uploadedBy: [Person!]! @relationship(type: "UPLOADED_BY", direction: OUT)
   """People extracted from this document (provenance — see EXTRACTED_FROM)."""
   extractedPeople: [Person!]!
@@ -1573,7 +1603,7 @@ interface FieldPulse {
   Documents this pulse was extracted from (doc-ingestion provenance — see GOAL-242 + ADR-0002).
   Empty for manually-created pulses. Returned newest-uploaded first.
   """
-  extractedFrom: [Document!]! @declareRelationship
+  extractedFrom: [ResourcePulse!]! @declareRelationship
 }
 
 """
@@ -1693,7 +1723,7 @@ type GoalPulse implements FieldPulse
   createdBy: [Person!]! @relationship(type: "CREATED_BY", direction: OUT)
   initiatedBy: [Person!]! @relationship(type: "INITIATED_BY", direction: OUT)
   context: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)
-  extractedFrom: [Document!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  extractedFrom: [ResourcePulse!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
 }
 
 """
@@ -1758,7 +1788,21 @@ type ResourcePulse implements FieldPulse
         operations: [DELETE]
         where: {
           node: {
-            OR: [
+            AND: [
+              # GOAL-354: a document-backed Resource may NOT be deleted through
+              # the generated root. `deleteDocument` is the only path that also
+              # removes the S3 blob and nulls the now-dangling download locators
+              # on every pulse extracted from it (GOAL-321). A generated delete
+              # drops the graph node and leaves the file in S3 forever with no
+              # way to reach it — a right-to-erasure failure, not just untidy
+              # state — and strands extracted pulses on a dead URL.
+              #
+              # This matters because ingestion stamps the uploader CREATED_BY so
+              # the resource renders with an author, and the creator-self-delete
+              # branch below would otherwise hand that uploader a delete that
+              # skips all three cleanups.
+              { NOT: { resourceType_EQ: "document" } }
+              { OR: [
               # Creator self-delete (kb/02 matrix) must accept BOTH live
               # author edges: createdBy (dashboard flow, imports) and
               # initiatedBy (assistant + doc-ingest paths) — either alone
@@ -1783,6 +1827,7 @@ type ResourcePulse implements FieldPulse
                   ]
                 }
               }
+              ] }
             ]
           }
         }
@@ -1805,10 +1850,146 @@ type ResourcePulse implements FieldPulse
   location: String
   time: String
   
+  # ---------------------------------------------------------------------------
+  # Source-file properties (GOAL-354).
+  #
+  # A document is a Resource, not a node of its own: an uploaded file (or an
+  # article fetched server-side by the bulk import) becomes a ResourcePulse
+  # carrying `resourceType: 'document'`, and these fields describe the source
+  # it points back at. The bytes never live in Neo4j — they stay in S3 and the
+  # graph holds only the key/URL pointer.
+  #
+  # Every field below is `@settable(onCreate: false, onUpdate: false)`. That is
+  # load-bearing, not decorative. `:Document` carried `@mutation(operations: [])`
+  # precisely so the generated CRUD roots could not reach its ingest machinery
+  # (GOAL-292); ResourcePulse *does* expose generated CRUD, so the guard has to
+  # move down to the field level. Without it any ADMIN/MEMBER of the Space could
+  # re-queue ingestion via `update: { ingestStatus_SET: "PENDING" }` — unbounded
+  # Gemini/OpenAI spend attributed to the original uploader — plant arbitrary
+  # member-visible copy in `ingestStatusMessage`, and falsify the entity counts.
+  #
+  # `@selectable(onRead: false)` and `@filterable(byValue: false)` do NOT imply
+  # `@sortable(byValue: false)` — ordering by a hidden field is a comparison
+  # oracle that leaks it a bit at a time. This repo learned that in GOAL-275
+  # (see the Person PII block above); the blob pointers below carry all four.
+  #
+  # ANY new field added to this block MUST carry the same guards.
+  # ---------------------------------------------------------------------------
+
+  """Original filename of the source file. Null for resources that are not
+  backed by a file. The UI captions a document-backed resource by `title`,
+  which the migration seeds from this."""
+  sourceFilename: String @settable(onCreate: false, onUpdate: false)
+  """MIME type of the source file: `text/plain`, `text/markdown`,
+  `application/pdf` in v1."""
+  sourceMimeType: String @settable(onCreate: false, onUpdate: false)
+  sourceSizeBytes: Int @settable(onCreate: false, onUpdate: false)
+  """Page count for paginated formats (.pdf). 1 for .txt/.md. Null when unknown."""
+  sourcePageCount: Int @settable(onCreate: false, onUpdate: false)
+  """S3 object key for the source file. Internal — the bytes live in S3 and
+  members reach them through the opaque, Space-scoped download locator on
+  `location` (GOAL-302), never through this. `@selectable(onRead: false)`
+  removes it from read selection sets and `@filterable(byValue: false)` blocks
+  value inference via filters; the download route reads it server-side over raw
+  Cypher."""
+  sourceBlobKey: String
+    @settable(onCreate: false, onUpdate: false)
+    @selectable(onRead: false, onAggregate: false)
+    @filterable(byValue: false, byAggregate: false)
+    @sortable(byValue: false)
+  """Provider-issued URL for the S3 object. May be expiring/private — never
+  returned to a client. Same gate as `sourceBlobKey`."""
+  sourceBlobUrl: String
+    @settable(onCreate: false, onUpdate: false)
+    @selectable(onRead: false, onAggregate: false)
+    @filterable(byValue: false, byAggregate: false)
+    @sortable(byValue: false)
+  """
+  Where this resource came from — one field serving two paths that arrived at
+  the same idea independently.
+
+  GOAL-344: the public link the bytes were fetched from, when the resource was
+  not uploaded by a member but read server-side by the bulk article import.
+  Null for uploads. Also the idempotency key for that import — one FieldContext
+  never fetches the same article twice (`findArticleDocument`).
+
+  GOAL-355: where the resource was *found*, as distinct from `location`, which
+  is the resource itself. Written from the sheet's `source_url` column (WF-11).
+  Nullable and additive: pulses created before GOAL-355, and rows whose sheet
+  omits the column, simply have no value.
+
+  It is a property of its own rather than part of `content` precisely so the
+  doc-ingest pass that may replace a placeholder body with an AI-generated
+  summary can never overwrite it — the failure members hit when they carried
+  the source link in the description column.
+
+  Deliberately NOT read-only, unlike the rest of this block: GOAL-355 requires
+  that an owner / ADMIN / MEMBER can correct it through the generated update
+  mutation, exactly as they can `location`. That is safe here in a way it is
+  not for the fields around it — this is a public link, not ingest machinery,
+  so editing it cannot re-queue a run or reach the blob store. The worst a bad
+  value does is cost one redundant article fetch.
+
+  Stored as the member typed it, never the post-redirect URL, which can carry
+  session tokens — so a share link's own token is visible to every member of
+  the Space, exactly as `location` already is.
+  """
+  sourceUrl: String
+  """Optional one-line "What is this?" hint captured at upload. Reused on
+  re-extract."""
+  sourceUserHint: String @settable(onCreate: false, onUpdate: false)
+  """AI-generated 1-paragraph synopsis of the source file, refreshed on
+  re-extract. Kept distinct from `content` so a re-extract never clobbers copy
+  a member has since edited on the resource itself."""
+  sourceSummary: String @settable(onCreate: false, onUpdate: false)
+  """Up to ~5 short concept phrases the AI surfaced as the source's high-level
+  themes. Empty when the summarizer returned nothing or the call failed."""
+  sourceConcepts: [String!] @settable(onCreate: false, onUpdate: false)
+
+  """Ingest lifecycle (GOAL-292): PENDING → PROCESSING → COMPLETE / FAILED.
+  Named `ingestStatus`, NOT `status` — ResourcePulse already carries a `status`
+  field with the pulse’s own (unrelated) meaning. Null on resources that were
+  never backed by a file, and on pre-GOAL-292 uploads, both of which read back
+  as COMPLETE."""
+  ingestStatus: String @settable(onCreate: false, onUpdate: false)
+  """Member-safe explanation when `ingestStatus` is FAILED — safe to render
+  verbatim (kb/07 Rule 1: raw driver/model error text is logged server-side
+  only). Null in every other state."""
+  ingestStatusMessage: String @settable(onCreate: false, onUpdate: false)
+  """Entities the ingest run wrote into the graph. Populated when
+  `ingestStatus` reaches COMPLETE."""
+  ingestCreatedEntityCount: Int @settable(onCreate: false, onUpdate: false)
+  """Proposed entities whose write failed during the ingest run — partial
+  success is normal and is detailed in the ingest thread."""
+  ingestFailedEntityCount: Int @settable(onCreate: false, onUpdate: false)
+
   createdBy: [Person!]! @relationship(type: "CREATED_BY", direction: OUT)
   initiatedBy: [Person!]! @relationship(type: "INITIATED_BY", direction: OUT)
   context: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)
-  extractedFrom: [Document!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  extractedFrom: [ResourcePulse!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  """The member who brought this source file in. Null for resources with no
+  backing file. Retained as its own edge (rather than folded into `createdBy`)
+  so the audit trail keeps saying who uploaded, even after authorship is
+  re-attributed to an extracted author.
+
+  `@settable(onCreate: false, onUpdate: false)` is REQUIRED here and is not
+  redundant with the scalar guards above: `@settable` on a scalar removes only
+  that scalar, and a bare `@relationship` field still generates
+  `ResourcePulseUploadedByUpdateFieldInput` with connect/disconnect/create/
+  update/delete. ResourcePulse's `validate` block covers CREATE/UPDATE/DELETE
+  but NOT CREATE_RELATIONSHIP/DELETE_RELATIONSHIP, so a nested
+  `update: { uploadedBy: [{ disconnect: ... }, { connect: ... }] }` was gated by
+  nothing beyond ordinary Space membership.
+
+  This edge is not decorative. `src/lib/ingest/document-storage.ts` records that
+  UPLOADED_BY *is* the captured authorization decision — the ingest worker runs
+  under CRON_SECRET with no request context and attributes its entity writes to
+  this identity — and it is the per-user in-flight quota anchor. Once the ingest
+  pipeline re-anchors onto ResourcePulse, a writable UPLOADED_BY is privilege
+  escalation, not just audit-trail forgery."""
+  uploadedBy: [Person!]!
+    @relationship(type: "UPLOADED_BY", direction: OUT)
+    @settable(onCreate: false, onUpdate: false)
 }
 
 """
@@ -1939,7 +2120,7 @@ type StoryPulse implements FieldPulse
   createdBy: [Person!]! @relationship(type: "CREATED_BY", direction: OUT)
   initiatedBy: [Person!]! @relationship(type: "INITIATED_BY", direction: OUT)
   context: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)
-  extractedFrom: [Document!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  extractedFrom: [ResourcePulse!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
 }
 
 """
@@ -2044,7 +2225,7 @@ type CarePulse implements FieldPulse
   createdBy: [Person!]! @relationship(type: "CREATED_BY", direction: OUT)
   initiatedBy: [Person!]! @relationship(type: "INITIATED_BY", direction: OUT)
   context: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)
-  extractedFrom: [Document!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  extractedFrom: [ResourcePulse!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
 }
 
 """
@@ -2148,7 +2329,7 @@ type CoreValuePulse implements FieldPulse
   createdBy: [Person!]! @relationship(type: "CREATED_BY", direction: OUT)
   initiatedBy: [Person!]! @relationship(type: "INITIATED_BY", direction: OUT)
   context: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)
-  extractedFrom: [Document!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  extractedFrom: [ResourcePulse!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
 }
 
 """
@@ -2521,7 +2702,7 @@ type Organization
       direction: OUT
       nestedOperations: [DISCONNECT]
     )
-  extractedFrom: [Document!]!
+  extractedFrom: [ResourcePulse!]!
     @relationship(type: "EXTRACTED_FROM", direction: OUT)
 }
 

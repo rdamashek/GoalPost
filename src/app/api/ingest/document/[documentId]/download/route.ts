@@ -61,12 +61,13 @@ async function resolveAuthorizedBlobKey(
     const result = await session.executeRead(async (tx) =>
       tx.run(
         `
-        MATCH (space:Space)-[:HAS_CONTEXT]->(c:FieldContext)-[:HAS_DOCUMENT]->(d:Document {id: $documentId})
+        MATCH (space:Space)-[:HAS_CONTEXT]->(c:FieldContext)-[:HAS_PULSE]->(d:FieldPulse {id: $documentId})
+        WHERE d:ResourcePulse
         OPTIONAL MATCH (owner:Person {id: $userId})-[:OWNS]->(space)
         OPTIONAL MATCH (space)-[:HAS_MEMBER]->(:SpaceMembership)-[:IS_MEMBER]->(member:Person {id: $userId})
         WITH d, (owner IS NOT NULL OR member IS NOT NULL) AS allowed
         WHERE allowed
-        RETURN d.blobKey AS blobKey
+        RETURN d.sourceBlobKey AS blobKey
         LIMIT 1
         `,
         { userId, documentId }

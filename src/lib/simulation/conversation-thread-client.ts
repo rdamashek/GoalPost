@@ -90,19 +90,21 @@ function turnToUIMessage(turn: StoredTurn): UIMessage {
 }
 
 /**
- * Fetch the active thread (or a specific one by id) and convert it to the
- * runtime's UIMessage[] shape. Returns `null` when the user has no thread yet
- * OR the fetch failed — the caller should treat both as "start with an empty
- * conversation."
+ * Fetch one thread by id and convert it to the runtime's UIMessage[] shape.
+ * Returns `null` when the thread is gone OR the fetch failed — the caller
+ * should treat both as "start with an empty conversation."
+ *
+ * `threadId` is required (GOAL-345). There is deliberately no "just give me
+ * whatever thread was most recent" mode: the chat panel opens empty on every
+ * initial load, and hydration only ever happens for a thread the member
+ * explicitly picked.
  */
 export async function fetchHydratedThread(
-  signal?: AbortSignal,
-  threadId?: string
+  threadId: string,
+  signal?: AbortSignal
 ): Promise<HydratedThread | null> {
   try {
-    const url = threadId
-      ? `/api/chat/simulation/thread?id=${encodeURIComponent(threadId)}`
-      : '/api/chat/simulation/thread'
+    const url = `/api/chat/simulation/thread?id=${encodeURIComponent(threadId)}`
     const response = await fetch(url, {
       method: 'GET',
       credentials: 'include',
@@ -182,29 +184,5 @@ export async function createConversationThread(): Promise<string | null> {
       error instanceof Error ? error.message : error
     )
     return null
-  }
-}
-
-/**
- * Pin a thread as the user's "last viewed" so a hard refresh re-opens it.
- * Fire-and-forget: failures degrade to legacy most-recent-by-lastTurnAt
- * selection on next hydration.
- */
-export async function persistLastViewedThread(threadId: string): Promise<void> {
-  try {
-    await fetch('/api/chat/simulation/threads', {
-      method: 'PATCH',
-      credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(await authHeaders()),
-      },
-      body: JSON.stringify({ lastViewedThreadId: threadId }),
-    })
-  } catch (error) {
-    console.warn(
-      '[conversation-thread-client] persistLastViewedThread failed:',
-      error instanceof Error ? error.message : error
-    )
   }
 }

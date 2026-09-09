@@ -3,9 +3,8 @@ import { driver } from '@/lib/neo4j/driver'
 import {
   appendConversationTurn,
   createConversationThread,
-  getActiveConversationThread,
+  getConversationThread,
   listConversationThreadsSummary,
-  setLastViewedConversationThread,
 } from './conversation-thread.service'
 import { seedAndIngest } from '@/lib/ingest/__test-utils__/handle-ingest-document-helper'
 import { createMemoryBlobStore } from '@/lib/ingest/blob-store'
@@ -22,8 +21,14 @@ import type { ExtractionModelClient } from '@/lib/ingest/extraction-model-invoke
  *      turn's pre-staged tool-call behaviour.)
  *   2. The reflective (implicit) thread defaults to `mode = 'default'`
  *      and `kind = 'reflective'`.
- *   3. `lastViewedThreadId` survives a hard refresh — `getActiveConversationThread`
- *      returns the pinned thread, not the most-recent-by-lastTurnAt.
+ *   3. (GOAL-345, replacing the original Slice 5 pin invariant) Nothing pins a
+ *      thread as "last viewed". The chat panel opens on an empty conversation
+ *      on every initial load, so `createIngestThread` must not stamp
+ *      `lastViewedThreadId` — a cron-run ingest would otherwise drop the
+ *      member into an "Uploaded ….pdf" thread they never opened. History stays
+ *      reachable through `listConversationThreadsSummary`.
+ *   4. Threads are User-owned: `getConversationThread` never returns another
+ *      member's thread.
  *
  * Skips automatically when no local Neo4j is available so the rest of the
  * suite can still run.
@@ -138,8 +143,9 @@ describe('GOAL-240 Slice 5 — thread switcher + Standard-mode forcing', () => {
         expect(r.get('mode')).toBe('default')
         expect(r.get('kind')).toBe('ingest')
         expect(r.get('title')).toBe('Ingest: notes.txt')
-        // The route stamps lastViewedThreadId so a hard refresh re-opens it.
-        expect(r.get('pin')).toBe(result.threadId)
+        // GOAL-345: ingest must NOT pin the thread. The upload auto-switches
+        // in-session via a client event; the next load opens empty.
+        expect(r.get('pin')).toBeNull()
       } finally {
         await session.close()
       }
@@ -168,7 +174,7 @@ describe('GOAL-240 Slice 5 — thread switcher + Standard-mode forcing', () => {
   })
 
   itIf(true)(
-    'last-viewed pin survives a hard refresh — getActiveConversationThread returns the pinned thread, not the most-recent-by-lastTurnAt',
+    'ingest never pins a thread — a cron-run ingest leaves no lastViewedThreadId, and history stays reachable in the thread list',
     async () => {
       if (!neo4jAvailable) return
 
@@ -196,8 +202,8 @@ describe('GOAL-240 Slice 5 — thread switcher + Standard-mode forcing', () => {
       // Pause briefly so the second thread has a strictly later lastTurnAt.
       await new Promise((r) => setTimeout(r, 25))
 
-      // Create a NEWER ingest thread — its createIngestThread overwrites
-      // lastViewedThreadId to itself.
+      // Create a NEWER ingest thread — this is the "cron ran while the member
+      // was away" case that used to hijack the next page load.
       const newer = await seedAndIngest(
         { driver, blobStore, modelClient },
         {
@@ -212,14 +218,32 @@ describe('GOAL-240 Slice 5 — thread switcher + Standard-mode forcing', () => {
       expect(newer.ok).toBe(true)
       if (!newer.ok) throw new Error('unreachable')
 
-      // User switches back to the older thread via the switcher.
-      await setLastViewedConversationThread(ids.user, older.threadId)
+      // No pin is left behind by either ingest, so nothing can be restored
+      // on top of the empty landing conversation.
+      const session = driver.session()
+      try {
+        const rows = await session.run(
+          `MATCH (u:Person {id: $userId}) RETURN u.lastViewedThreadId AS pin`,
+          { userId: ids.user }
+        )
+        expect(rows.records[0]?.get('pin') ?? null).toBeNull()
+      } finally {
+        await session.close()
+      }
 
-      // After the simulated refresh, the active thread MUST be the pinned one,
-      // not the more-recently-touched ingest thread.
-      const active = await getActiveConversationThread(ids.user)
-      expect(active).not.toBeNull()
-      expect(active!.id).toBe(older.threadId)
+      // Both ingest threads remain one tap away in the switcher, newest first.
+      const list = await listConversationThreadsSummary(ids.user)
+      const listed = list.map((row) => row.id)
+      expect(listed).toContain(older.threadId)
+      expect(listed).toContain(newer.threadId)
+      expect(listed.indexOf(newer.threadId)).toBeLessThan(
+        listed.indexOf(older.threadId)
+      )
+
+      // And picking one hydrates its full history.
+      const hydrated = await getConversationThread(ids.user, newer.threadId)
+      expect(hydrated).not.toBeNull()
+      expect(hydrated!.id).toBe(newer.threadId)
     }
   )
 
@@ -301,33 +325,52 @@ describe('GOAL-240 Slice 5 — thread switcher + Standard-mode forcing', () => {
   )
 
   itIf(true)(
-    'setLastViewedConversationThread is a no-op when the thread does not belong to the user (cross-user isolation)',
+    'getConversationThread never returns another member\u2019s thread (cross-user isolation)',
     async () => {
       if (!neo4jAvailable) return
-      // Read the current pin
+
+      const otherUserId = `test_other_${runId}`
       const session = driver.session()
-      let priorPin: string | null = null
+      let otherThreadId = ''
       try {
-        const rows = await session.run(
-          `MATCH (u:Person {id: $userId}) RETURN u.lastViewedThreadId AS pin`,
-          { userId: ids.user }
+        await session.run(
+          `CREATE (u:Person:User {id: $otherUserId, firstName: 'Other', lastName: 'Member', name: 'Other Member', createdAt: datetime()})`,
+          { otherUserId }
         )
-        priorPin = (rows.records[0]?.get('pin') as string | null) ?? null
+        const created = await createConversationThread(otherUserId)
+        otherThreadId = created.threadId
+        await appendConversationTurn(
+          otherUserId,
+          { role: 'user', content: 'private to the other member' },
+          otherThreadId
+        )
       } finally {
         await session.close()
       }
 
-      await setLastViewedConversationThread(ids.user, 'thread_definitely_not_mine')
+      // The thread exists and its real owner can read it \u2026
+      const asOwner = await getConversationThread(otherUserId, otherThreadId)
+      expect(asOwner).not.toBeNull()
 
-      const session2 = driver.session()
+      // \u2026 but it is invisible to anyone else. Scoping is structural: the
+      // Cypher anchors on (:Person:User {id: $userId})-[:HAS_THREAD]->.
+      const asStranger = await getConversationThread(ids.user, otherThreadId)
+      expect(asStranger).toBeNull()
+
+      // And it never leaks into their thread list.
+      const list = await listConversationThreadsSummary(ids.user)
+      expect(list.map((row) => row.id)).not.toContain(otherThreadId)
+
+      const cleanup = driver.session()
       try {
-        const rows = await session2.run(
-          `MATCH (u:Person {id: $userId}) RETURN u.lastViewedThreadId AS pin`,
-          { userId: ids.user }
+        await cleanup.run(
+          `MATCH (u:Person {id: $otherUserId})-[:HAS_THREAD]->(t:ConversationThread)
+           OPTIONAL MATCH (t)-[:HAS_TURN]->(turn:ConversationTurn)
+           DETACH DELETE turn, t, u`,
+          { otherUserId }
         )
-        expect(rows.records[0]?.get('pin')).toBe(priorPin)
       } finally {
-        await session2.close()
+        await cleanup.close()
       }
     }
   )

@@ -15,8 +15,11 @@ interface ResonanceSuggestionItemProps {
   targetPulseId: string
   targetPulseContent: string
   contextTitle: string
-  onAccept: (id: string) => Promise<void>
-  onDecline: (id: string) => Promise<void>
+  /** Omit BOTH to render the suggestion read-only — a viewer without
+   *  `canEditContent` (a WeSpace GUEST) may read the review queue but cannot
+   *  act on it, and must not be shown controls that can only 403. */
+  onAccept?: (id: string) => Promise<void>
+  onDecline?: (id: string) => Promise<void>
   isLoading?: boolean
 }
 
@@ -48,7 +51,10 @@ export function ResonanceSuggestionItem({
   onDecline,
   isLoading = false,
 }: ResonanceSuggestionItemProps) {
+  const canReview = Boolean(onAccept || onDecline)
+
   const handleAccept = async () => {
+    if (!onAccept) return
     try {
       await onAccept(id)
     } catch (error) {
@@ -57,6 +63,7 @@ export function ResonanceSuggestionItem({
   }
 
   const handleDecline = async () => {
+    if (!onDecline) return
     try {
       await onDecline(id)
     } catch (error) {
@@ -92,8 +99,10 @@ export function ResonanceSuggestionItem({
         {description}
       </p>
 
-      {/* Pulse Excerpts */}
-      <div className="mb-4 space-y-2">
+      {/* Pulse Excerpts — stacked on phones, side by side once the dialog
+          widens (GOAL-353), which is where the extra horizontal space actually
+          buys back vertical scrolling instead of just lengthening lines. */}
+      <div className="mb-4 grid grid-cols-1 gap-2 lg:grid-cols-2">
         <div className="rounded bg-slate-50/50 p-3 dark:bg-slate-800/50">
           <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">
             Pulse 1
@@ -120,26 +129,32 @@ export function ResonanceSuggestionItem({
         <p className="text-sm text-blue-800 dark:text-blue-200">{evidence}</p>
       </div>
 
-      {/* Actions */}
-      <div className="flex gap-3">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleDecline}
-          disabled={isLoading}
-          className="flex-1"
-        >
-          Decline
-        </Button>
-        <Button
-          size="sm"
-          onClick={handleAccept}
-          disabled={isLoading}
-          className="flex-1"
-        >
-          {isLoading ? 'Processing...' : 'Accept'}
-        </Button>
-      </div>
+      {/* Actions — hidden entirely for a read-only viewer */}
+      {canReview && (
+        <div className="flex gap-3">
+          {onDecline && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleDecline}
+              disabled={isLoading}
+              className="flex-1"
+            >
+              Decline
+            </Button>
+          )}
+          {onAccept && (
+            <Button
+              size="sm"
+              onClick={handleAccept}
+              disabled={isLoading}
+              className="flex-1"
+            >
+              {isLoading ? 'Processing...' : 'Accept'}
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   )
 }

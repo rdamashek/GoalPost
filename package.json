@@ -20,6 +20,8 @@
     "seed:user": "cross-env DOTENV_CONFIG_PATH=./.env.local node scripts/seed-initial-user.js",
     "migrate:prod-to-dev": "cross-env DOTENV_CONFIG_PATH=./.env.local tsx scripts/migrate-prod-to-dev.ts",
     "normalize:person-emails": "cross-env DOTENV_CONFIG_PATH=./.env.local tsx scripts/normalize-person-emails.ts",
+    "migrate:document-to-resource": "cross-env DOTENV_CONFIG_PATH=./.env.local tsx scripts/migrate-document-to-resource.ts",
+    "migrate:document-to-resource:demo": "cross-env DOTENV_CONFIG_PATH=./.env.demo tsx scripts/migrate-document-to-resource.ts",
     "seed:build-space": "cross-env DOTENV_CONFIG_PATH=./.env.local tsx scripts/seed-build-space.ts",
     "backfill:resonance-created-at": "cross-env DOTENV_CONFIG_PATH=./.env.local tsx scripts/backfill-resonance-created-at.ts",
     "backfill:corevalue-labels": "cross-env DOTENV_CONFIG_PATH=./.env.local tsx scripts/backfill-corevalue-pulse-labels.ts",

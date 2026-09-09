@@ -83,8 +83,14 @@ export interface DocumentIngestPipelineDependencies {
  * modes, so they cannot drive the tool calls the synthesized turn already
  * pre-staged. Forcing `default` at creation guarantees subsequent replies in
  * the thread route through the standard tool-execution path regardless of
- * the user's prior global mode. Also stamps `lastViewedThreadId` so a hard
- * refresh restores the user to the ingest thread the upload just opened.
+ * the user's prior global mode.
+ *
+ * GOAL-345 — this deliberately does NOT pin the thread as "last viewed". The
+ * cron worker runs ingests while the member is away, and stamping a pin here
+ * meant every subsequent load dropped them into an "Uploaded ….pdf" thread
+ * they never opened. The in-session auto-switch after an upload (kb/03 WF-10
+ * step 7) is a client-side event and is unaffected; on the next load the panel
+ * opens empty and this thread is simply first in the switcher.
  */
 export async function createIngestThread(
   driver: Driver,
@@ -99,7 +105,8 @@ export async function createIngestThread(
       tx.run(
         `
         MATCH (p:Person:User {id: $userId})
-        MATCH (d:Document {id: $documentId})
+        MATCH (d:FieldPulse {id: $documentId})
+        WHERE d:ResourcePulse
         CREATE (p)-[:HAS_THREAD]->(t:ConversationThread {
           id: $threadId,
           createdAt: datetime(),
@@ -110,7 +117,6 @@ export async function createIngestThread(
           kind: 'ingest'
         })
         CREATE (d)-[:HAS_INGEST_THREAD]->(t)
-        SET p.lastViewedThreadId = $threadId
         `,
         { userId, documentId, threadId, title }
       )

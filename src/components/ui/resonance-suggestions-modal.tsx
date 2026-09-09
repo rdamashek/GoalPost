@@ -161,7 +161,17 @@ export function ResonanceSuggestionsModal({
   return (
     <Dialog open={isOpen} onOpenChange={handleClose}>
       <DialogPortal>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        {/* Each card carries a long description, two pulse excerpts and a "Why
+            they resonate" paragraph, so this dialog needs far more horizontal
+            room than the primitive's default (GOAL-353). The `sm:` prefix is
+            load-bearing: DialogContent ships `sm:max-w-lg`, and only a class in
+            that same variant makes twMerge drop it — an unprefixed `max-w-2xl`
+            loses to it at every width past 640px, which is why this dialog was
+            rendering at 512px on a 1440px screen. Keep the unprefixed
+            `max-w-2xl` too: it displaces the primitive's
+            `max-w-[calc(100%-2rem)]`, which is what keeps the phone layout
+            edge-to-edge and unchanged. */}
+        <DialogContent className="max-w-2xl sm:max-w-2xl lg:max-w-4xl xl:max-w-5xl max-h-[90vh] overflow-y-auto">
           {/* Header */}
           <div className="border-b border-slate-200 pb-4 dark:border-slate-700">
             <DialogTitle className="text-2xl font-bold text-slate-900 dark:text-slate-100">
@@ -202,8 +212,11 @@ export function ResonanceSuggestionsModal({
                 targetPulseId={currentSuggestion.targetPulseId}
                 targetPulseContent={currentSuggestion.targetPulseContent}
                 contextTitle={currentSuggestion.contextTitle}
-                onAccept={handleAccept}
-                onDecline={handleDecline}
+                // Undefined when the viewer lacks `canEditContent` — the item
+                // then renders read-only rather than showing controls the
+                // accept/decline routes would reject (kb/02-user-roles.md).
+                onAccept={onAccept ? handleAccept : undefined}
+                onDecline={onDecline ? handleDecline : undefined}
                 isLoading={actionLoading === currentSuggestion.id}
               />
 
@@ -248,8 +261,11 @@ export function ResonanceSuggestionsModal({
                       )}
                     >
                       {status}
+                      {/* min-w + horizontal padding, not a fixed w-5: a Space
+                          can queue three-digit counts (159 in the GOAL-353
+                          report) and a fixed 20px circle clipped them. */}
                       {tabCounts[status] > 0 && (
-                        <span className="ml-2 inline-flex items-center justify-center w-5 h-5 text-xs font-semibold text-white bg-slate-600 rounded-full dark:bg-slate-500">
+                        <span className="ml-2 inline-flex items-center justify-center min-w-5 h-5 px-1.5 text-xs font-semibold text-white bg-slate-600 rounded-full dark:bg-slate-500">
                           {tabCounts[status]}
                         </span>
                       )}
@@ -342,8 +358,8 @@ export function ResonanceSuggestionsModal({
                       targetPulseId={suggestion.targetPulseId}
                       targetPulseContent={suggestion.targetPulseContent}
                       contextTitle={suggestion.contextTitle}
-                      onAccept={handleAccept}
-                      onDecline={handleDecline}
+                      onAccept={onAccept ? handleAccept : undefined}
+                      onDecline={onDecline ? handleDecline : undefined}
                       isLoading={actionLoading === suggestion.id}
                     />
                   ))}

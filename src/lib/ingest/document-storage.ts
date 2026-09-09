@@ -4,12 +4,13 @@ import {
   DOCUMENT_INGEST_STATUS,
   type DocumentIngestStatus,
 } from './document-ingest-queue'
+import { RESOURCE_TYPE_DOCUMENT } from './source-resource-node'
 
 /**
  * Owns the lifecycle of `Document` nodes and their backing blob. v1 ships
  * with one mimeType (text/plain) and a flat `documents/<docId>/<filename>`
  * blob key; later slices add PDF/MD and size gating, none of which change
- * the (Document, HAS_DOCUMENT, UPLOADED_BY) graph contract pinned here.
+ * the (ResourcePulse, HAS_PULSE, UPLOADED_BY) graph contract pinned here.
  *
  * Order of operations on `uploadDocument`:
  *   1. Reserve the graph: MATCH the FieldContext + uploader, then CREATE
@@ -147,23 +148,67 @@ export async function anchorDocument(input: AnchorDocumentInput): Promise<void> 
         // CREATE only, so a retry arriving after the worker has already started
         // cannot reset the status machine or the attempt counter. The
         // document_id uniqueness constraint makes this safe under concurrency.
-        MERGE (d:Document {id: $documentId})
+        // MERGE on :FieldPulse, not :ResourcePulse — pulse_id is the
+        // uniqueness constraint that makes this safe under concurrency, and it
+        // is declared on :FieldPulse. Merging on the subtype would have no
+        // constraint behind it and could mint a duplicate on a retry.
+        MERGE (d:FieldPulse {id: $documentId})
         ON CREATE SET
-          d.filename = $filename,
-          d.mimeType = $mimeType,
-          d.sizeBytes = toInteger($sizeBytes),
-          d.pageCount = $pageCount,
-          d.userHint = $userHint,
-          d.blobKey = $blobKey,
-          d.blobUrl = $blobUrl,
+          d:ResourcePulse,
+          d.resourceType = $resourceType,
+          // The Resource is the focal point for resonance and discussion, so it
+          // needs a real title/content from the moment it is anchored — the
+          // extractor fills sourceSummary later, and the summarizer may fail.
+          // title/content are String! and there is no second chance to
+          // populate them before the pulse becomes visible.
+          d.title = $filename,
+          d.content = coalesce($userHint, $filename),
+          d.createdAt = datetime(),
+          d.modifiedAt = datetime(),
+          d.sourceFilename = $filename,
+          d.sourceMimeType = $mimeType,
+          d.sourceSizeBytes = toInteger($sizeBytes),
+          d.sourcePageCount = $pageCount,
+          d.sourceUserHint = $userHint,
+          d.sourceBlobKey = $blobKey,
+          d.sourceBlobUrl = $blobUrl,
           d.sourceUrl = $sourceUrl,
-          d.status = $status,
-          d.statusMessage = null,
-          d.statusUpdatedAt = datetime(),
+          d.ingestStatus = $status,
+          d.ingestStatusMessage = null,
+          d.ingestStatusUpdatedAt = datetime(),
           d.ingestAttempts = 0,
+          // Retained alongside createdAt as the queue's ordering key, so the
+          // drain order survives any later edit to the pulse's createdAt.
           d.uploadedAt = datetime()
-        MERGE (c)-[:HAS_DOCUMENT]->(d)
+        // Guard against adopting an unrelated pulse. The MERGE key is now the
+        // shared :FieldPulse id namespace, so a colliding id would MATCH an
+        // existing StoryPulse, skip ON CREATE entirely, and then graft document
+        // edges onto it — no :ResourcePulse label, no sourceBlobKey, and no
+        // error. Impossible while the node was separately typed (:Document).
+        // Zero rows here trips the records.length === 0 throw below.
+        WITH c, u, d
+        WHERE d:ResourcePulse AND d.resourceType = $resourceType
+        MERGE (c)-[:HAS_PULSE]->(d)
         MERGE (d)-[:UPLOADED_BY]->(u)
+        // The uploader is the pulse's displayed author until the extractor
+        // credits a byline; resolvePulseAuthor reads initiatedBy[0] then
+        // createdBy[0], so without this the resource renders authorless.
+        MERGE (d)-[:CREATED_BY]->(u)
+        // Activity Log. This was defensible to omit while the node sat outside
+        // the pulse activity model as a (:Document), but anchoring now creates
+        // a member-visible ResourcePulse in the field's pulse list, and every
+        // other pulse-creation path writes one. Delete and re-extract both log;
+        // creation was the gap. Guarded on ON CREATE semantics by MERGE-ing the
+        // log id, so a retried /process call does not log twice.
+        MERGE (log:Log {id: $logId})
+        ON CREATE SET
+          log.description = 'Added document "' + $filename + '"' +
+            CASE WHEN c.title IS NOT NULL AND c.title <> ''
+              THEN ' to ' + c.title
+              ELSE ''
+            END,
+          log.createdAt = datetime()
+        MERGE (log)-[:CREATED_BY]->(u)
         RETURN d.id AS id
         `,
         {
@@ -179,12 +224,16 @@ export async function anchorDocument(input: AnchorDocumentInput): Promise<void> 
           blobUrl: input.blobUrl,
           sourceUrl: input.sourceUrl?.trim() || null,
           status: input.status ?? DOCUMENT_INGEST_STATUS.complete,
+          resourceType: RESOURCE_TYPE_DOCUMENT,
+          // Derived from the document id, not random, so a retry MERGEs the
+          // same Log rather than appending a duplicate to the activity feed.
+          logId: `log_anchor_${input.documentId}`,
         }
       )
     )
     if (result.records.length === 0) {
       throw new Error(
-        `anchorDocument: could not anchor Document — FieldContext "${input.fieldContextId}" or uploader "${input.uploaderUserId}" not found.`
+        `anchorDocument: could not anchor document resource "${input.documentId}" — FieldContext "${input.fieldContextId}" or uploader "${input.uploaderUserId}" not found, or the id collided with an existing non-document pulse.`
       )
     }
   } finally {
@@ -229,7 +278,16 @@ export async function loadDocumentRecord(
     const result = await session.executeRead(async (tx) =>
       tx.run(
         `
-        MATCH (c:FieldContext)-[:HAS_DOCUMENT]->(d:Document {id: $documentId})
+        // A :Document had exactly one HAS_DOCUMENT edge, so LIMIT 1 was
+        // unambiguous. A ResourcePulse can legitimately sit in several contexts
+        // (purge-deleted-field-contexts.ts is built around that case), and the
+        // whole pipeline — extraction target, entity writes, discovery sweep —
+        // runs against whichever context this returns. An arbitrary pick could
+        // land extracted people and pulses in a different Space than the
+        // uploader intended, so order deterministically rather than taking
+        // whatever the planner yields first.
+        MATCH (c:FieldContext)-[:HAS_PULSE]->(d:FieldPulse {id: $documentId})
+        WHERE d:ResourcePulse
         // Collect uploaders rather than OPTIONAL MATCH + LIMIT 1. The cron
         // worker runs AS this user (GOAL-292), so an anomalous document with two
         // UPLOADED_BY edges must not resolve non-deterministically to whichever
@@ -238,17 +296,18 @@ export async function loadDocumentRecord(
         WITH c, d, collect(DISTINCT uploader.id) AS uploaderIds
         RETURN
           d.id AS id,
-          d.filename AS filename,
-          d.mimeType AS mimeType,
-          d.sizeBytes AS sizeBytes,
-          d.pageCount AS pageCount,
-          d.blobKey AS blobKey,
-          d.blobUrl AS blobUrl,
-          d.userHint AS userHint,
+          d.sourceFilename AS filename,
+          d.sourceMimeType AS mimeType,
+          d.sourceSizeBytes AS sizeBytes,
+          d.sourcePageCount AS pageCount,
+          d.sourceBlobKey AS blobKey,
+          d.sourceBlobUrl AS blobUrl,
+          d.sourceUserHint AS userHint,
           d.sourceUrl AS sourceUrl,
           c.id AS fieldContextId,
           uploaderIds,
-          coalesce(d.status, $completeStatus) AS status
+          coalesce(d.ingestStatus, $completeStatus) AS status
+        ORDER BY fieldContextId
         LIMIT 1
         `,
         { documentId, completeStatus: DOCUMENT_INGEST_STATUS.complete }
@@ -303,8 +362,8 @@ export async function setDocumentPageCount(input: {
       tx.run(
         // toInteger: the driver encodes a plain JS number as a Float64, which
         // would store 3.0 on an int-declared property and render as "3.0".
-        `MATCH (d:Document {id: $documentId})
-         SET d.pageCount = toInteger($pageCount)`,
+        `MATCH (d:FieldPulse {id: $documentId}) WHERE d:ResourcePulse
+         SET d.sourcePageCount = toInteger($pageCount)`,
         { documentId: input.documentId, pageCount: input.pageCount }
       )
     )
@@ -334,9 +393,11 @@ export async function setDocumentSummary(
     await session.executeWrite((tx) =>
       tx.run(
         `
-        MATCH (d:Document {id: $documentId})
-        SET d.summary = $summary,
-            d.concepts = $concepts
+        MATCH (d:FieldPulse {id: $documentId})
+        WHERE d:ResourcePulse
+        SET d.sourceSummary = $summary,
+            d.sourceConcepts = $concepts,
+            d.modifiedAt = datetime()
         `,
         {
           documentId: input.documentId,
@@ -364,16 +425,28 @@ export async function deleteDocument(
   try {
     const lookup = await session.executeRead(async (tx) =>
       tx.run(
-        `MATCH (d:Document {id: $documentId}) RETURN d.blobKey AS blobKey`,
-        { documentId: input.documentId }
+        `MATCH (d:FieldPulse {id: $documentId})
+         WHERE d:ResourcePulse AND d.resourceType = $resourceType
+         RETURN d.sourceBlobKey AS blobKey`,
+        { documentId: input.documentId, resourceType: RESOURCE_TYPE_DOCUMENT }
       )
     )
     blobKey = (lookup.records[0]?.get('blobKey') as string | null) ?? null
 
     await session.executeWrite(async (tx) =>
-      tx.run(`MATCH (d:Document {id: $documentId}) DETACH DELETE d`, {
-        documentId: input.documentId,
-      })
+      tx.run(
+        // Narrowed to document-backed resources: this helper takes a bare id
+        // and applies NO permission gate of its own, so without the predicate
+        // it would DETACH DELETE any resource in any Space. The authorized
+        // path is handleDeleteDocument.
+        `MATCH (d:FieldPulse {id: $documentId})
+         WHERE d:ResourcePulse AND d.resourceType = $resourceType
+         DETACH DELETE d`,
+        {
+          documentId: input.documentId,
+          resourceType: RESOURCE_TYPE_DOCUMENT,
+        }
+      )
     )
   } finally {
     await session.close()
