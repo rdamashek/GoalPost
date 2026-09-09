@@ -105,7 +105,8 @@ export async function createIngestThread(
       tx.run(
         `
         MATCH (p:Person:User {id: $userId})
-        MATCH (d:Document {id: $documentId})
+        MATCH (d:FieldPulse {id: $documentId})
+        WHERE d:ResourcePulse
         CREATE (p)-[:HAS_THREAD]->(t:ConversationThread {
           id: $threadId,
           createdAt: datetime(),

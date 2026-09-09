@@ -161,7 +161,18 @@ export async function purgeDeletedFieldContexts(
                ctxSugs + [x IN pulseConns WHERE x:ResonanceSuggestion AND NOT x IN ctxSugs] AS sugs
           WITH c, pulses, weaves, docs, importJobs, orphanOrgs, chunks, links, sugs,
                c.title AS title,
-               [d IN docs WHERE d.blobKey IS NOT NULL | d.blobKey] AS blobKeys
+               // GOAL-354: a document is a ResourcePulse, so its blob key lives
+               // on the pulse as sourceBlobKey and it is collected by the
+               // pulses branch above, not by docs. Reading only docs here
+               // would silently stop cleaning up S3 the moment the migration
+               // runs — the purge would delete the graph node and leave the
+               // file behind forever, which is the retention guarantee this
+               // cron exists to honour. The legacy docs branch is kept until
+               // the Document type is retired so a pre-migration environment
+               // still cleans up.
+               [d IN docs WHERE d.blobKey IS NOT NULL | d.blobKey]
+                 + [p IN pulses WHERE p.sourceBlobKey IS NOT NULL | p.sourceBlobKey]
+                 AS blobKeys
           FOREACH (n IN chunks | DETACH DELETE n)
           FOREACH (n IN links | DETACH DELETE n)
           FOREACH (n IN sugs | DETACH DELETE n)

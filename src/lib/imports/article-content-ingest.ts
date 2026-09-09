@@ -43,7 +43,7 @@ import {
  *      failures) and reduce it to text (`article-html-text.ts`) or keep the
  *      PDF bytes.
  *   2. Store that as a `Document` on the field — same blob layout, same node,
- *      same `HAS_DOCUMENT` / `UPLOADED_BY` edges — so it shows in the document
+ *      same `HAS_PULSE` / `UPLOADED_BY` edges — so it shows in the document
  *      list and is downloadable, re-extractable and deletable like an upload.
  *      `sourceUrl` records where it came from and is the idempotency key: a
  *      re-uploaded sheet never fetches the same article into a field twice.
@@ -237,10 +237,10 @@ async function findArticleDocument(
     const result = await session.executeRead((tx) =>
       tx.run(
         `
-        MATCH (c:FieldContext {id: $fieldContextId})-[:HAS_DOCUMENT]->(d:Document)
+        MATCH (c:FieldContext {id: $fieldContextId})-[:HAS_PULSE]->(d:ResourcePulse)
         WHERE d.sourceUrl = $sourceUrl
-        RETURN d.id AS id, coalesce(d.status, $complete) AS status
-        ORDER BY d.uploadedAt DESC
+        RETURN d.id AS id, coalesce(d.ingestStatus, $complete) AS status
+        ORDER BY coalesce(d.uploadedAt, d.createdAt) DESC
         LIMIT 1
         `,
         {
@@ -287,11 +287,18 @@ async function attachRowPulseToDocument(
         // Both ends anchored on the field the import targets, so a stale or
         // mismatched pulse id can never link a pulse to a document elsewhere.
         MATCH (c:FieldContext {id: $fieldContextId})-[:HAS_PULSE]->(p:FieldPulse {id: $pulseId})
-        MATCH (c)-[:HAS_DOCUMENT]->(d:Document {id: $documentId})
+        MATCH (c)-[:HAS_PULSE]->(d:FieldPulse {id: $documentId})
+          WHERE d:ResourcePulse
         MATCH (u:Person:User {id: $userId})
+        // d <> p guards a self-loop that only became reachable once a document
+        // became a pulse: both ends are now :FieldPulse under the same context,
+        // so a row whose pulse id equals its document id would MERGE an
+        // EXTRACTED_FROM edge from the node to itself. Impossible while the
+        // target was a separately-typed (:Document).
+        WHERE d <> p
         MERGE (p)-[:EXTRACTED_FROM]->(d)
         WITH p, d, u,
-          (d.summary IS NOT NULL AND trim(d.summary) <> ''
+          (d.sourceSummary IS NOT NULL AND trim(d.sourceSummary) <> ''
             AND (
               p.content IS NULL
               OR trim(p.content) = ''
@@ -299,7 +306,7 @@ async function attachRowPulseToDocument(
               OR trim(p.content) =~ '(?i)^https?://\\\\S+$'
             )) AS fill
         FOREACH (_ IN CASE WHEN fill THEN [1] ELSE [] END |
-          SET p.content = d.summary,
+          SET p.content = d.sourceSummary,
               p.embedding = null,
               p.updatedAt = datetime(),
               p.modifiedAt = datetime()

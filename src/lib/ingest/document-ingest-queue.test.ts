@@ -89,27 +89,27 @@ async function createDocument(options: CreateDocumentOptions): Promise<string> {
         `
         MATCH (c:FieldContext {id: $fieldContextId})
         MATCH (u:Person:User {id: $userId})
-        CREATE (d:Document {
+        CREATE (d:FieldPulse:ResourcePulse {
           id: $documentId,
-          filename: $filename,
-          mimeType: 'text/plain',
-          sizeBytes: 29,
-          pageCount: 1,
-          userHint: null,
-          blobKey: 'documents/' + $documentId + '/notes.txt',
-          blobUrl: 'memory://' + $documentId,
-          statusMessage: null,
-          statusUpdatedAt: datetime() - duration({minutes: $statusMinutesAgo}),
+          sourceFilename: $filename,
+          sourceMimeType: 'text/plain',
+          sourceSizeBytes: 29,
+          sourcePageCount: 1,
+          sourceUserHint: null,
+          sourceBlobKey: 'documents/' + $documentId + '/notes.txt',
+          sourceBlobUrl: 'memory://' + $documentId,
+          ingestStatusMessage: null,
+          ingestStatusUpdatedAt: datetime() - duration({minutes: $statusMinutesAgo}),
           ingestAttempts: $ingestAttempts,
           ingestClaimedBy: $ingestClaimedBy,
           uploadedAt: datetime() - duration({minutes: $uploadedMinutesAgo})
         })
-        CREATE (c)-[:HAS_DOCUMENT]->(d)
+        CREATE (c)-[:HAS_PULSE]->(d)
         CREATE (d)-[:UPLOADED_BY]->(u)
         // A legacy document carries no status property at all, so the SET has
         // to be conditional rather than writing an explicit null.
         FOREACH (_ IN CASE WHEN $status IS NULL THEN [] ELSE [1] END |
-          SET d.status = $status
+          SET d.ingestStatus = $status
         )
         RETURN d.id AS id
         `,
@@ -152,10 +152,10 @@ async function readDocumentState(documentId: string): Promise<DocumentState> {
     const result = await session.executeRead((tx) =>
       tx.run(
         `
-        MATCH (d:Document {id: $documentId})
-        RETURN d.status AS status,
-               d.statusMessage AS statusMessage,
-               toString(d.statusUpdatedAt) AS statusUpdatedAt,
+        MATCH (d:ResourcePulse {id: $documentId})
+        RETURN d.ingestStatus AS status,
+               d.ingestStatusMessage AS statusMessage,
+               toString(d.ingestStatusUpdatedAt) AS statusUpdatedAt,
                coalesce(d.ingestAttempts, 0) AS ingestAttempts,
                d.ingestClaimedBy AS ingestClaimedBy,
                d.ingestCreatedEntityCount AS createdEntityCount,
@@ -195,7 +195,7 @@ async function deleteDocuments(documentIds: string[]): Promise<void> {
     await session.executeWrite((tx) =>
       tx.run(
         `
-        MATCH (d:Document)
+        MATCH (d:ResourcePulse)
         WHERE d.id IN $documentIds
         DETACH DELETE d
         `,
@@ -257,9 +257,9 @@ afterAll(async () => {
     // makes that impossible regardless of what happens next.
     await session.run(
       `
-      MATCH (d:Document)
+      MATCH (d:ResourcePulse)
       WHERE d.id STARTS WITH $prefix
-      SET d.status = $complete,
+      SET d.ingestStatus = $complete,
           d.ingestClaimedBy = null
       `,
       { prefix, complete: DOCUMENT_INGEST_STATUS.complete }
@@ -328,7 +328,7 @@ describe('claimDocumentForIngest', () => {
 
     // The whole point of the write-then-guard shape in the queue: without the
     // `SET d.ingestClaimedBy` that takes the write lock *before* the
-    // `WHERE d.status = 'PENDING'` re-check, Neo4j's read-committed isolation
+    // `WHERE d.ingestStatus = 'PENDING'` re-check, Neo4j's read-committed isolation
     // lets overlapping claims all pass a predicate they evaluated before
     // holding the lock — a lost update that runs the LLM pipeline twice and
     // double-creates entities. Measured at 11/12 trials with the naive shape.

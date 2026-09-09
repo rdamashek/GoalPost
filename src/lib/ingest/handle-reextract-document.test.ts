@@ -71,7 +71,7 @@ afterAll(async () => {
       { userId: ids.user }
     )
     await session.run(
-      `MATCH (c:FieldContext {id: $ctxId})-[:HAS_DOCUMENT]->(d:Document) DETACH DELETE d`,
+      `MATCH (c:FieldContext {id: $ctxId})-[:HAS_PULSE]->(d:ResourcePulse) DETACH DELETE d`,
       { ctxId: ids.fieldContext }
     )
     await session.run(
@@ -177,7 +177,7 @@ describe('handleReExtractDocument — slice 6', () => {
       try {
         // Exactly one Document node for this filename — re-extract reused it.
         const docRows = await session.run(
-          `MATCH (c:FieldContext {id: $ctxId})-[:HAS_DOCUMENT]->(d:Document {filename: 'plan.txt'}) RETURN d.id AS id`,
+          `MATCH (c:FieldContext {id: $ctxId})-[:HAS_PULSE]->(d:ResourcePulse {sourceFilename: 'plan.txt'}) RETURN d.id AS id`,
           { ctxId: ids.fieldContext }
         )
         expect(docRows.records).toHaveLength(1)
@@ -186,7 +186,7 @@ describe('handleReExtractDocument — slice 6', () => {
         // Both threads linked to the Document via HAS_INGEST_THREAD; newer
         // thread title carries the "(re-extracted)" marker.
         const threadRows = await session.run(
-          `MATCH (d:Document {id: $docId})-[:HAS_INGEST_THREAD]->(t:ConversationThread)
+          `MATCH (d:ResourcePulse {id: $docId})-[:HAS_INGEST_THREAD]->(t:ConversationThread)
            RETURN t.id AS id, t.title AS title
            ORDER BY t.createdAt ASC`,
           { docId: upload.documentId }

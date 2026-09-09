@@ -379,7 +379,8 @@ async function lookupDocumentFilename(
 ): Promise<string | null> {
   try {
     const rows = await graph.query<{ filename: string | null }>(
-      `MATCH (d:Document {id: $documentId}) RETURN d.filename AS filename LIMIT 1`,
+      `MATCH (d:FieldPulse {id: $documentId}) WHERE d:ResourcePulse
+       RETURN d.sourceFilename AS filename LIMIT 1`,
       { documentId }
     )
     const value = rows?.[0]?.filename
@@ -1379,7 +1380,8 @@ async function createPulseAuthorized(
     // pre-verified above, but the guard ran in a separate transaction).
     OPTIONAL MATCH (author:Person {id: $authorId})
       WHERE EXISTS { (context)-[:HAS_PERSON]->(author) }
-    OPTIONAL MATCH (doc:Document {id: $documentId})
+    OPTIONAL MATCH (doc:FieldPulse {id: $documentId})
+      WHERE doc:ResourcePulse
     CREATE (pulse:FieldPulse${pulseLabel} {
       id: $pulseId,
       title: $title,
@@ -1671,7 +1673,8 @@ async function createPersonAuthorized(
       `
       MATCH (c:FieldContext {id: $contextId})
       MATCH (u:Person {id: $currentUserId})
-      OPTIONAL MATCH (d:Document {id: $documentId})
+      OPTIONAL MATCH (d:FieldPulse {id: $documentId})
+        WHERE d:ResourcePulse
       MERGE (c)-[hp:HAS_PERSON]->(u)
       // GOAL-346: this is the acting user's OWN account being linked to the
       // field they uploaded into — an identity attach, not an extracted
@@ -1815,7 +1818,8 @@ async function createPersonAuthorized(
     `
     MATCH (c:FieldContext {id: $contextId})
     MATCH (u:Person {id: $currentUserId})
-    OPTIONAL MATCH (d:Document {id: $documentId})
+    OPTIONAL MATCH (d:FieldPulse {id: $documentId})
+      WHERE d:ResourcePulse
     CREATE (p:Person:PersonPulse {
       id: $personId,
       firstName: $firstName,
@@ -1997,7 +2001,8 @@ async function updatePersonAuthorized(
     `
     MATCH (p:Person {id: $personId})
     MATCH (u:Person {id: $currentUserId})
-    OPTIONAL MATCH (d:Document {id: $documentId})
+    OPTIONAL MATCH (d:FieldPulse {id: $documentId})
+      WHERE d:ResourcePulse
     FOREACH (_ IN CASE WHEN $newFirstName IS NULL THEN [] ELSE [1] END |
       SET p.firstName = $newFirstName
     )
@@ -2257,7 +2262,8 @@ async function createOrganizationAuthorized(
       `
       MATCH (o:Organization {id: $existingId})
       MATCH (u:Person {id: $currentUserId})
-      OPTIONAL MATCH (d:Document {id: $documentId})
+      OPTIONAL MATCH (d:FieldPulse {id: $documentId})
+        WHERE d:ResourcePulse
       FOREACH (_ IN CASE WHEN $setDescription THEN [1] ELSE [] END |
         SET o.description = $orgDescription
       )
@@ -2310,7 +2316,8 @@ async function createOrganizationAuthorized(
     `
     MATCH (c:FieldContext {id: $contextId})
     MATCH (u:Person {id: $currentUserId})
-    OPTIONAL MATCH (d:Document {id: $documentId})
+    OPTIONAL MATCH (d:FieldPulse {id: $documentId})
+      WHERE d:ResourcePulse
     CREATE (o:Organization:LifeSensor:RelationalEntity {
       id: $organizationId,
       name: $name,
@@ -3491,7 +3498,8 @@ export async function executeAuthorizedWriteTool(
         `
         MATCH (pulse:FieldPulse {id: $pulseId})
         MATCH (u:Person {id: $currentUserId})
-        OPTIONAL MATCH (d:Document {id: $documentId})
+        OPTIONAL MATCH (d:FieldPulse {id: $documentId})
+          WHERE d:ResourcePulse
         CREATE (log:Log {
           id: $logId,
           description: $description,

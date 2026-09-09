@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Driver } from 'neo4j-driver'
 import type { BlobStore } from './blob-store'
 import { parseDocumentDownloadLocation } from './document-download-url'
+import { RESOURCE_TYPE_DOCUMENT } from './source-resource-node'
 
 /**
  * Document deletion orchestrator (PRD `docs/prd/document-ingestion.md` § Out
@@ -111,10 +112,20 @@ export async function handleDeleteDocument(
       //    Coarse CONTAINS prefilter only — the exact match happens in JS.
       const candidatesResult = await tx.run(
         `
-        MATCH (space:Space)-[:HAS_CONTEXT]->(c:FieldContext)-[:HAS_DOCUMENT]->(d:Document {id: $documentId})
+        MATCH (space:Space)-[:HAS_CONTEXT]->(c:FieldContext)-[:HAS_PULSE]->(d:FieldPulse {id: $documentId})
+        // resourceType narrowing is load-bearing, not decoration. This gate
+        // admits OWNER + ADMIN + MEMBER, but the DELETE matrix in
+        // kb/02-user-roles.md reserves deleting someone else's resource for
+        // creator/ADMIN/owner. While the target was (:Document) via
+        // HAS_DOCUMENT that gap was unreachable — only ingest ever created
+        // those nodes. HAS_PULSE reaches EVERY resource in the context, so
+        // without this predicate a plain MEMBER could pass an ordinary
+        // member-authored resource id and hard-delete content the GraphQL path
+        // forbids them to touch.
+        WHERE d:ResourcePulse AND d.resourceType = $resourceType
         OPTIONAL MATCH (owner:Person {id: $userId})-[:OWNS]->(space)
         OPTIONAL MATCH (space)-[:HAS_MEMBER]->(sm:SpaceMembership)-[:IS_MEMBER]->(:Person {id: $userId})
-        WHERE sm.role IN ['ADMIN', 'MEMBER']
+          WHERE sm.role IN ['ADMIN', 'MEMBER']
         WITH d, c, (owner IS NOT NULL OR sm IS NOT NULL) AS allowed
         WHERE allowed
         OPTIONAL MATCH (c)-[:HAS_PULSE]->(cp:FieldPulse)
@@ -125,7 +136,12 @@ export async function handleDeleteDocument(
           collect(DISTINCT cp { .id, .location }) +
           collect(DISTINCT ep { .id, .location }) AS candidates
         `,
-        { documentId, userId, locatorMarker: DOCUMENT_LOCATOR_MARKER }
+        {
+          documentId,
+          userId,
+          locatorMarker: DOCUMENT_LOCATOR_MARKER,
+          resourceType: RESOURCE_TYPE_DOCUMENT,
+        }
       )
       const candidates = (candidatesResult.records[0]?.get('candidates') ??
         []) as Array<{ id: string; location: string | null }>
@@ -149,14 +165,24 @@ export async function handleDeleteDocument(
       //    missing-or-forbidden; the callback returns before any clearing.
       const result = await tx.run(
         `
-        MATCH (space:Space)-[:HAS_CONTEXT]->(c:FieldContext)-[:HAS_DOCUMENT]->(d:Document {id: $documentId})
+        MATCH (space:Space)-[:HAS_CONTEXT]->(c:FieldContext)-[:HAS_PULSE]->(d:FieldPulse {id: $documentId})
+        // resourceType narrowing is load-bearing, not decoration. This gate
+        // admits OWNER + ADMIN + MEMBER, but the DELETE matrix in
+        // kb/02-user-roles.md reserves deleting someone else's resource for
+        // creator/ADMIN/owner. While the target was (:Document) via
+        // HAS_DOCUMENT that gap was unreachable — only ingest ever created
+        // those nodes. HAS_PULSE reaches EVERY resource in the context, so
+        // without this predicate a plain MEMBER could pass an ordinary
+        // member-authored resource id and hard-delete content the GraphQL path
+        // forbids them to touch.
+        WHERE d:ResourcePulse AND d.resourceType = $resourceType
         OPTIONAL MATCH (owner:Person {id: $userId})-[:OWNS]->(space)
         OPTIONAL MATCH (space)-[:HAS_MEMBER]->(sm:SpaceMembership)-[:IS_MEMBER]->(:Person {id: $userId})
-        WHERE sm.role IN ['ADMIN', 'MEMBER']
+          WHERE sm.role IN ['ADMIN', 'MEMBER']
         WITH d, c, (owner IS NOT NULL OR sm IS NOT NULL) AS allowed
         WHERE allowed
         MATCH (u:Person:User {id: $userId})
-        WITH d, c, u, d.blobKey AS blobKey, d.filename AS filename
+        WITH d, c, u, d.sourceBlobKey AS blobKey, d.sourceFilename AS filename
         CREATE (log:Log {
           id: $logId,
           description: 'Deleted document "' + coalesce(filename, '') + '"' +
@@ -169,11 +195,27 @@ export async function handleDeleteDocument(
         })
         CREATE (log)-[:CREATED_BY]->(u)
         WITH d, blobKey, filename
+        // A document is a pulse now, so it enters the resonance pipeline like
+        // any other: on-upload-discovery embeds every FieldPulse under the
+        // context that lacks an embedding, and ResonanceLink / ResonanceSuggestion
+        // nodes then attach via SOURCE/TARGET. A bare DETACH DELETE drops those
+        // edges and leaves the link nodes half-connected — an orphan suggestion
+        // surfacing in the canvas action bar pointing at a pulse that is gone.
+        // purgeDeletedFieldContexts already collects and deletes them; this path
+        // has to as well, and it is now the ONLY path, since the SDL forbids the
+        // generated delete for resourceType 'document'.
+        OPTIONAL MATCH (conn)-[:SOURCE|TARGET]->(d)
+          WHERE conn:ResonanceLink OR conn:ResonanceSuggestion
+        OPTIONAL MATCH (d)-[:HAS_CHUNK]->(chunk:ConversationChunk)
+        WITH d, blobKey, filename,
+             collect(DISTINCT conn) AS conns, collect(DISTINCT chunk) AS chunks
+        FOREACH (n IN conns | DETACH DELETE n)
+        FOREACH (n IN chunks | DETACH DELETE n)
         DETACH DELETE d
         RETURN blobKey, filename
         LIMIT 1
         `,
-        { documentId, userId, logId, metadata }
+        { documentId, userId, logId, metadata, resourceType: RESOURCE_TYPE_DOCUMENT }
       )
       const record = result.records[0]
       if (!record) {

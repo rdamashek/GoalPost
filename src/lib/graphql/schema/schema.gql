@@ -490,7 +490,7 @@ type Person implements PersonInterface
   @authorization directive, so non-members of the parent Space see an empty list even if
   the underlying EXTRACTED_FROM edge exists.
   """
-  extractedFrom: [Document!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  extractedFrom: [ResourcePulse!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
   """
   Pulses (goal/resource/story) this person was identified as related to / named
   in but is not the author of (GOAL-298, MENTIONED_IN). Each FieldPulse is
@@ -1573,7 +1573,7 @@ interface FieldPulse {
   Documents this pulse was extracted from (doc-ingestion provenance — see GOAL-242 + ADR-0002).
   Empty for manually-created pulses. Returned newest-uploaded first.
   """
-  extractedFrom: [Document!]! @declareRelationship
+  extractedFrom: [ResourcePulse!]! @declareRelationship
 }
 
 """
@@ -1693,7 +1693,7 @@ type GoalPulse implements FieldPulse
   createdBy: [Person!]! @relationship(type: "CREATED_BY", direction: OUT)
   initiatedBy: [Person!]! @relationship(type: "INITIATED_BY", direction: OUT)
   context: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)
-  extractedFrom: [Document!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  extractedFrom: [ResourcePulse!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
 }
 
 """
@@ -1758,7 +1758,21 @@ type ResourcePulse implements FieldPulse
         operations: [DELETE]
         where: {
           node: {
-            OR: [
+            AND: [
+              # GOAL-354: a document-backed Resource may NOT be deleted through
+              # the generated root. `deleteDocument` is the only path that also
+              # removes the S3 blob and nulls the now-dangling download locators
+              # on every pulse extracted from it (GOAL-321). A generated delete
+              # drops the graph node and leaves the file in S3 forever with no
+              # way to reach it — a right-to-erasure failure, not just untidy
+              # state — and strands extracted pulses on a dead URL.
+              #
+              # This matters because ingestion stamps the uploader CREATED_BY so
+              # the resource renders with an author, and the creator-self-delete
+              # branch below would otherwise hand that uploader a delete that
+              # skips all three cleanups.
+              { NOT: { resourceType_EQ: "document" } }
+              { OR: [
               # Creator self-delete (kb/02 matrix) must accept BOTH live
               # author edges: createdBy (dashboard flow, imports) and
               # initiatedBy (assistant + doc-ingest paths) — either alone
@@ -1783,6 +1797,7 @@ type ResourcePulse implements FieldPulse
                   ]
                 }
               }
+              ] }
             ]
           }
         }
@@ -1895,7 +1910,7 @@ type ResourcePulse implements FieldPulse
   createdBy: [Person!]! @relationship(type: "CREATED_BY", direction: OUT)
   initiatedBy: [Person!]! @relationship(type: "INITIATED_BY", direction: OUT)
   context: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)
-  extractedFrom: [Document!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  extractedFrom: [ResourcePulse!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
   """The member who brought this source file in. Null for resources with no
   backing file. Retained as its own edge (rather than folded into `createdBy`)
   so the audit trail keeps saying who uploaded, even after authorship is
@@ -2049,7 +2064,7 @@ type StoryPulse implements FieldPulse
   createdBy: [Person!]! @relationship(type: "CREATED_BY", direction: OUT)
   initiatedBy: [Person!]! @relationship(type: "INITIATED_BY", direction: OUT)
   context: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)
-  extractedFrom: [Document!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  extractedFrom: [ResourcePulse!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
 }
 
 """
@@ -2154,7 +2169,7 @@ type CarePulse implements FieldPulse
   createdBy: [Person!]! @relationship(type: "CREATED_BY", direction: OUT)
   initiatedBy: [Person!]! @relationship(type: "INITIATED_BY", direction: OUT)
   context: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)
-  extractedFrom: [Document!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  extractedFrom: [ResourcePulse!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
 }
 
 """
@@ -2258,7 +2273,7 @@ type CoreValuePulse implements FieldPulse
   createdBy: [Person!]! @relationship(type: "CREATED_BY", direction: OUT)
   initiatedBy: [Person!]! @relationship(type: "INITIATED_BY", direction: OUT)
   context: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)
-  extractedFrom: [Document!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
+  extractedFrom: [ResourcePulse!]! @relationship(type: "EXTRACTED_FROM", direction: OUT)
 }
 
 """
@@ -2631,7 +2646,7 @@ type Organization
       direction: OUT
       nestedOperations: [DISCONNECT]
     )
-  extractedFrom: [Document!]!
+  extractedFrom: [ResourcePulse!]!
     @relationship(type: "EXTRACTED_FROM", direction: OUT)
 }
 
