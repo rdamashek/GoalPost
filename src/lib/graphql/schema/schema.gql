@@ -1223,7 +1223,9 @@ type FieldContext
       nestedOperations: [DISCONNECT]
     )
   pulses: [FieldPulse!]! @relationship(type: "HAS_PULSE", direction: OUT)
-  documents: [Document!]! @relationship(type: "HAS_DOCUMENT", direction: OUT)
+  """Document-backed resources in this context. HAS_PULSE reaches every pulse;
+  the Document type's own READ filter narrows it to `resourceType: "document"`."""
+  documents: [Document!]! @relationship(type: "HAS_PULSE", direction: OUT)
   resonances: [ResonanceLink!]!
     @relationship(type: "HAS_RESONANCE", direction: OUT)
   # Read-only from this side. Weaves are authored through the PromiseWeave
@@ -1313,7 +1315,19 @@ Documents are never auto-deleted; cleanup is user-driven (slice 6 ships the
 delete mutation).
 """
 type Document
-  @node(labels: ["Document"])
+  # GOAL-354: `Document` is no longer its own node — a document IS a Resource.
+  # This type is now a READ PROJECTION over document-backed ResourcePulses:
+  # same field names the UI already consumes, `@alias`ed onto the `source*` /
+  # `ingest*` properties the pulse actually carries. Keeping the projection is
+  # what let the ingest remodel land without rewriting the document UI in the
+  # same change; the UI migrating to ResourcePulse directly is a later slice,
+  # after which this type goes away.
+  #
+  # The label alone would match EVERY ResourcePulse, so the READ filter below
+  # additionally requires `resourceType: "document"`. That predicate is the only
+  # thing separating this type from ordinary resources — it must stay ANDed
+  # around the Space check, never ORed beside it.
+  @node(labels: ["ResourcePulse"])
   # No generated CRUD (GOAL-292). Every Document write goes through a purpose-
   # built path that owns an invariant the generic mutations cannot: the REST
   # presign/process flow (anchors with a server-minted id + PENDING status), the
@@ -1326,11 +1340,17 @@ type Document
   # and re-point `uploadedBy` so the worker ran as somebody else.
   @mutation(operations: [])
   @authorization(
-    # READ — inherits from the parent FieldContext / Space.
+    # READ — inherits from the parent FieldContext / Space, AND is restricted to
+    # document-backed resources (GOAL-354). Without the resourceType predicate
+    # every generated read on this type — `documents(where: …)`, and the
+    # `FieldContext.documents` traversal — would return ordinary member-authored
+    # resources projected through document field names, i.e. rows with a null
+    # filename and a download link to nothing.
     filter: [
       {
         where: {
           node: {
+            resourceType_EQ: "document"
             fieldContext_SOME: {
               OR: [
                 { meSpace_SOME: { owner_SOME: { id_EQ: "$jwt.user.id" } } }
@@ -1380,23 +1400,29 @@ type Document
     ]
   ) {
   id: ID! @id
-  filename: String!
-  mimeType: String!
-  sizeBytes: Int!
+  """Always "document" — the predicate that separates this projection from
+  ordinary resources. Declared because the READ filter above has to reference
+  it; an @authorization filter can only name fields the type declares."""
+  resourceType: String!
+  filename: String! @alias(property: "sourceFilename")
+  mimeType: String! @alias(property: "sourceMimeType")
+  sizeBytes: Int! @alias(property: "sourceSizeBytes")
   """Page count for paginated formats (.pdf). 1 for .txt/.md. Null when unknown (legacy uploads)."""
-  pageCount: Int
+  pageCount: Int @alias(property: "sourcePageCount")
   """Blob storage key. Internal — UI surfaces filename instead. Never exposed
   to any client: `@selectable(onRead: false)` removes it from read selection
   sets and `@filterable(byValue: false)` blocks value inference via filters
   (GOAL-302). The download route reads it server-side over raw Cypher, so the
   file stays reachable to members through the opaque `downloadUrl` only."""
   blobKey: String
+    @alias(property: "sourceBlobKey")
     @selectable(onRead: false, onAggregate: false)
     @filterable(byValue: false, byAggregate: false)
   """Provider-issued URL for the blob. May be expiring/private — never returned
   to a client (GOAL-302); members open the file through `downloadUrl`. Same
   non-selectable / non-filterable gate as `blobKey`."""
   blobUrl: String
+    @alias(property: "sourceBlobUrl")
     @selectable(onRead: false, onAggregate: false)
     @filterable(byValue: false, byAggregate: false)
   """Durable, Space-scoped in-app link to open/download the uploaded file
@@ -1407,7 +1433,7 @@ type Document
   Space. Computed from the document id (see documentTypeResolvers.downloadUrl)."""
   downloadUrl: String @customResolver(requires: "id")
   """Optional one-line "What is this?" hint captured at upload. Reused on re-extract (slice 6)."""
-  userHint: String
+  userHint: String @alias(property: "sourceUserHint")
   """Public link this document was fetched from, when it was not uploaded by a
   member but read server-side by the bulk article import (GOAL-344). Null for
   uploads. Read-only: the worker stamps it at anchor time."""
@@ -1416,24 +1442,28 @@ type Document
   ingest time by a dedicated summarization call (independent of the entity
   extraction model). Null if the call failed or was skipped — document still
   lands either way (failure is non-fatal). Refreshed on re-extract."""
-  summary: String
+  summary: String @alias(property: "sourceSummary")
   """Up to ~5 short concept phrases the AI surfaced as the document's
   high-level themes. Rendered as chips on the Document card so the user can
   see what the doc is *about* before scanning extracted entities. Empty when
   the summarizer returned nothing or the call failed."""
-  concepts: [String!]
+  concepts: [String!] @alias(property: "sourceConcepts")
   """Ingest lifecycle (GOAL-292): PENDING → PROCESSING → COMPLETE / FAILED.
   The upload route anchors PENDING and returns 202; the
   /api/cron/process-document-ingestion worker transitions the rest. The upload
   UI polls this to show queued/processing/failed instead of blocking on a
   synchronous response. Documents uploaded before GOAL-292 have no stored value
   and read back as COMPLETE, so an old upload never looks stuck."""
-  status: String @settable(onCreate: false, onUpdate: false)
+  status: String
+    @alias(property: "ingestStatus")
+    @settable(onCreate: false, onUpdate: false)
   """Member-safe explanation when `status` is FAILED — safe to render verbatim
   (kb/07 Rule 1: raw driver/model error text is logged server-side only). Null
   in every other state. The file and its Document row both survive a failure,
   so Re-extract stays the recovery path."""
-  statusMessage: String @settable(onCreate: false, onUpdate: false)
+  statusMessage: String
+    @alias(property: "ingestStatusMessage")
+    @settable(onCreate: false, onUpdate: false)
   """Entities the ingest run wrote into the graph. Populated when `status`
   reaches COMPLETE; the upload UI reports it in the success toast."""
   ingestCreatedEntityCount: Int @settable(onCreate: false, onUpdate: false)
@@ -1441,7 +1471,7 @@ type Document
   success is normal and is detailed in the ingest thread."""
   ingestFailedEntityCount: Int @settable(onCreate: false, onUpdate: false)
   uploadedAt: DateTime!
-  fieldContext: [FieldContext!]! @relationship(type: "HAS_DOCUMENT", direction: IN)
+  fieldContext: [FieldContext!]! @relationship(type: "HAS_PULSE", direction: IN)
   uploadedBy: [Person!]! @relationship(type: "UPLOADED_BY", direction: OUT)
   """People extracted from this document (provenance — see EXTRACTED_FROM)."""
   extractedPeople: [Person!]!
@@ -1874,11 +1904,37 @@ type ResourcePulse implements FieldPulse
     @selectable(onRead: false, onAggregate: false)
     @filterable(byValue: false, byAggregate: false)
     @sortable(byValue: false)
-  """Public link the bytes were fetched from when this resource was not
-  uploaded by a member but read server-side by the bulk article import
-  (GOAL-344). Null for uploads. Stored as the member typed it — never the
-  post-redirect URL, which can carry session tokens."""
-  sourceUrl: String @settable(onCreate: false, onUpdate: false)
+  """
+  Where this resource came from — one field serving two paths that arrived at
+  the same idea independently.
+
+  GOAL-344: the public link the bytes were fetched from, when the resource was
+  not uploaded by a member but read server-side by the bulk article import.
+  Null for uploads. Also the idempotency key for that import — one FieldContext
+  never fetches the same article twice (`findArticleDocument`).
+
+  GOAL-355: where the resource was *found*, as distinct from `location`, which
+  is the resource itself. Written from the sheet's `source_url` column (WF-11).
+  Nullable and additive: pulses created before GOAL-355, and rows whose sheet
+  omits the column, simply have no value.
+
+  It is a property of its own rather than part of `content` precisely so the
+  doc-ingest pass that may replace a placeholder body with an AI-generated
+  summary can never overwrite it — the failure members hit when they carried
+  the source link in the description column.
+
+  Deliberately NOT read-only, unlike the rest of this block: GOAL-355 requires
+  that an owner / ADMIN / MEMBER can correct it through the generated update
+  mutation, exactly as they can `location`. That is safe here in a way it is
+  not for the fields around it — this is a public link, not ingest machinery,
+  so editing it cannot re-queue a run or reach the blob store. The worst a bad
+  value does is cost one redundant article fetch.
+
+  Stored as the member typed it, never the post-redirect URL, which can carry
+  session tokens — so a share link's own token is visible to every member of
+  the Space, exactly as `location` already is.
+  """
+  sourceUrl: String
   """Optional one-line "What is this?" hint captured at upload. Reused on
   re-extract."""
   sourceUserHint: String @settable(onCreate: false, onUpdate: false)

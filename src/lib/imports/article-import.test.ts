@@ -3,6 +3,7 @@ import {
   buildArticleImportMessage,
   buildArticleRowContent,
   normalizeArticleDate,
+  normalizeArticleResourceType,
   normalizeArticleUrl,
   parseArticleRows,
   resolveArticlePulseType,
@@ -178,6 +179,30 @@ describe('resolveArticlePulseType', () => {
   })
 })
 
+describe('normalizeArticleResourceType', () => {
+  it('lower-cases so "Book" and "book" land in one filterable bucket', () => {
+    expect(normalizeArticleResourceType('Book')).toBe('book')
+    expect(normalizeArticleResourceType('BOOK')).toBe('book')
+    expect(normalizeArticleResourceType('book')).toBe('book')
+  })
+
+  it('trims and collapses internal whitespace', () => {
+    expect(normalizeArticleResourceType('  Blog   Post ')).toBe('blog post')
+  })
+
+  it("accepts a member's own vocabulary rather than enforcing an enum", () => {
+    expect(normalizeArticleResourceType('Ontology')).toBe('ontology')
+    expect(normalizeArticleResourceType('Podcast')).toBe('podcast')
+    expect(normalizeArticleResourceType('Event')).toBe('event')
+  })
+
+  it('returns undefined for blank input so the caller can default', () => {
+    expect(normalizeArticleResourceType('')).toBeUndefined()
+    expect(normalizeArticleResourceType('   ')).toBeUndefined()
+    expect(normalizeArticleResourceType(undefined)).toBeUndefined()
+  })
+})
+
 describe('validateArticleTemplateHeaders', () => {
   it('accepts the canonical template headers', () => {
     const rows = [
@@ -284,6 +309,157 @@ describe('parseArticleRows', () => {
     expect(rows[0].description).toBeUndefined()
   })
 
+  // GOAL-355 — the two new optional columns.
+  it('maps resource_type and source_url onto their own row fields', () => {
+    const { rows, errors } = parseArticleRows([
+      {
+        title: 'The World Ending Fire',
+        author: 'Wendell Berry',
+        date: '2026-02-01',
+        url: 'https://example.org/the-world-ending-fire',
+        resource_type: 'Book',
+        source_url: 'https://www.linkedin.com/posts/example-share',
+      },
+    ])
+
+    expect(errors).toEqual([])
+    expect(rows[0].resourceType).toBe('book')
+    expect(rows[0].sourceUrl).toBe(
+      'https://www.linkedin.com/posts/example-share'
+    )
+    // The type is no longer smuggled into the title as a " - book" suffix.
+    expect(rows[0].title).toBe('The World Ending Fire')
+  })
+
+  it('reads both new columns through their aliases', () => {
+    const { rows, errors } = parseArticleRows([
+      {
+        title: 'T',
+        author: 'A',
+        date: '2026-01-01',
+        url: 'https://example.org/a',
+        resourcetype: 'Podcast',
+        sourceurl: 'example.org/where-i-found-it',
+      },
+    ])
+    expect(errors).toEqual([])
+    expect(rows[0].resourceType).toBe('podcast')
+    // Bare domains get the same https:// normalization the `url` column gets.
+    expect(rows[0].sourceUrl).toBe('https://example.org/where-i-found-it')
+  })
+
+  it('leaves both new fields undefined for a sheet in the old format', () => {
+    const { rows, errors } = parseArticleRows([
+      {
+        title: 'Dictionary of Radical Alternatives - ontology',
+        author: 'A',
+        date: '2026-01-01',
+        url: 'https://example.org/a',
+        description: 'https://www.linkedin.com/posts/example-share',
+      },
+    ])
+    expect(errors).toEqual([])
+    expect(rows[0].resourceType).toBeUndefined()
+    expect(rows[0].sourceUrl).toBeUndefined()
+    // Additive, not breaking: the old workaround row still imports as before.
+    expect(rows[0].description).toBe(
+      'https://www.linkedin.com/posts/example-share'
+    )
+  })
+
+  it('treats blank new columns as absent rather than as errors', () => {
+    const { rows, errors } = parseArticleRows([
+      {
+        title: 'T',
+        author: 'A',
+        date: '2026-01-01',
+        url: 'https://example.org/a',
+        resource_type: '   ',
+        source_url: '  ',
+      },
+    ])
+    expect(errors).toEqual([])
+    expect(rows[0].resourceType).toBeUndefined()
+    expect(rows[0].sourceUrl).toBeUndefined()
+  })
+
+  it('fails a row whose source_url is not a usable http(s) link', () => {
+    const { rows, errors } = parseArticleRows([
+      {
+        title: 'T',
+        author: 'A',
+        date: '2026-01-01',
+        url: 'https://example.org/a',
+        source_url: 'a LinkedIn post',
+      },
+    ])
+    expect(rows).toEqual([])
+    expect(errors).toHaveLength(1)
+    expect(errors[0].message).toContain('not a valid http(s) source URL')
+  })
+
+  it('refuses to strand the new columns on a non-resource row', () => {
+    const { rows, errors } = parseArticleRows([
+      {
+        title: 'T',
+        author: 'A',
+        date: '2026-01-01',
+        url: 'https://example.org/a',
+        pulse_type: 'story',
+        resource_type: 'Book',
+        source_url: 'https://example.org/found-here',
+      },
+    ])
+    expect(rows).toEqual([])
+    expect(errors[0].message).toContain(
+      'resource_type and source_url only apply to resource rows'
+    )
+  })
+
+  it('names only the stranded column that was actually supplied', () => {
+    const { errors } = parseArticleRows([
+      {
+        title: 'T',
+        author: 'A',
+        date: '2026-01-01',
+        url: 'https://example.org/a',
+        pulse_type: 'goal',
+        source_url: 'https://example.org/found-here',
+      },
+    ])
+    expect(errors[0].message).toContain('source_url only applies to')
+    expect(errors[0].message).not.toContain('resource_type')
+  })
+
+  it('ignores a source-ish header that is not one of the two aliases', () => {
+    // A pre-GOAL-355 sheet with a hand-kept "Source link" column of prose must
+    // keep importing — the narrow alias list is what protects it.
+    const { rows, errors } = parseArticleRows([
+      {
+        title: 'T',
+        author: 'A',
+        date: '2026-01-01',
+        url: 'https://example.org/a',
+        source_link: 'Amara sent it to me',
+      },
+    ])
+    expect(errors).toEqual([])
+    expect(rows[0].sourceUrl).toBeUndefined()
+  })
+
+  it('does not let source_url claim the required url column', () => {
+    const { rows, errors } = parseArticleRows([
+      {
+        title: 'T',
+        author: 'A',
+        date: '2026-01-01',
+        source_url: 'https://example.org/where-i-found-it',
+      },
+    ])
+    expect(rows).toEqual([])
+    expect(errors[0].message).toContain('URL is required.')
+  })
+
   it('skips fully empty rows silently while keeping row numbers aligned', () => {
     const { rows, errors } = parseArticleRows([
       { title: '', author: '  ', date: '', url: '' },
@@ -315,7 +491,9 @@ describe('parseArticleRows', () => {
     expect(rows).toEqual([])
     expect(errors).toHaveLength(1)
     expect(errors[0].message).toContain('Article title is required.')
-    expect(errors[0].message).toContain('"not a url" is not a valid http(s) URL.')
+    expect(errors[0].message).toContain(
+      '"not a url" is not a valid http(s) URL.'
+    )
     expect(errors[0].message).toContain(
       '"not-an-email" is not a valid author email.'
     )
@@ -368,7 +546,9 @@ describe('parseArticleRows', () => {
     ])
     expect(rows).toEqual([])
     expect(errors).toHaveLength(1)
-    expect(errors[0].message).toContain('"meeting" is not a supported pulse type')
+    expect(errors[0].message).toContain(
+      '"meeting" is not a supported pulse type'
+    )
   })
 
   it('echoes only trimmed, non-empty cells back in error data', () => {
@@ -432,9 +612,10 @@ describe('parseSpreadsheetArrayBuffer', () => {
   })
 
   it('feeds parseArticleRows via alias headers end-to-end', () => {
-    const csv = ['Headline,Byline,Published,Link', 'T,A,2026-01-02,example.org/x'].join(
-      '\n'
-    )
+    const csv = [
+      'Headline,Byline,Published,Link',
+      'T,A,2026-01-02,example.org/x',
+    ].join('\n')
     const parsed = parseSpreadsheetArrayBuffer(stringToArrayBuffer(csv))
     expect(parsed.parseErrors).toEqual([])
     expect(validateArticleTemplateHeaders(parsed.rows)).toEqual([])
@@ -522,24 +703,49 @@ describe('summarizeArticleOutcomes', () => {
       [
         outcome({
           row: 2,
-          extraction: { status: 'extracted', message: null, created: 3, updated: 1 },
+          extraction: {
+            status: 'extracted',
+            message: null,
+            created: 3,
+            updated: 1,
+          },
         }),
         outcome({
           row: 3,
-          extraction: { status: 'nothing_extracted', message: null, created: 0, updated: 1 },
+          extraction: {
+            status: 'nothing_extracted',
+            message: null,
+            created: 0,
+            updated: 1,
+          },
         }),
         outcome({
           row: 4,
-          extraction: { status: 'fetch_failed', message: 'The site could not be reached.', created: 0, updated: 0 },
+          extraction: {
+            status: 'fetch_failed',
+            message: 'The site could not be reached.',
+            created: 0,
+            updated: 0,
+          },
         }),
         outcome({
           row: 5,
-          extraction: { status: 'extraction_failed', message: 'x', created: 0, updated: 0 },
+          extraction: {
+            status: 'extraction_failed',
+            message: 'x',
+            created: 0,
+            updated: 0,
+          },
         }),
         // An earlier import already read this one — neither read nor unread this run.
         outcome({
           row: 6,
-          extraction: { status: 'already_extracted', message: 'y', created: 0, updated: 0 },
+          extraction: {
+            status: 'already_extracted',
+            message: 'y',
+            created: 0,
+            updated: 0,
+          },
         }),
         // A row that failed before its article was attempted carries no extraction.
         outcome({ row: 7, status: 'failed' }),
@@ -655,14 +861,16 @@ describe('buildArticleImportMessage', () => {
 
   it('reads articles without claiming additions when nothing new came of them', () => {
     expect(
-      buildArticleImportMessage(summary({ articlesRead: 1, createdFromArticles: 0 }))
+      buildArticleImportMessage(
+        summary({ articlesRead: 1, createdFromArticles: 0 })
+      )
     ).toBe('Imported 3 of 3 rows. Read 1 article.')
   })
 
   it('says nothing about articles when none were read this run', () => {
-    expect(buildArticleImportMessage(summary({ skippedExisting: 3, created: 0 }))).toBe(
-      'Imported 0 of 3 rows, 3 already existed.'
-    )
+    expect(
+      buildArticleImportMessage(summary({ skippedExisting: 3, created: 0 }))
+    ).toBe('Imported 0 of 3 rows, 3 already existed.')
   })
 
   it('names skipped and failed rows when there are any', () => {

@@ -59,12 +59,6 @@ export const ALLOWED_LABELS = [
   // subtype). Wraps a migrated care point so "show surrounding relationships"
   // has a starting point. Surfaced inside a FieldContext via HAS_WEAVE.
   'PromiseWeave',
-  // Uploaded source document attached to a FieldContext. The resource/goal/
-  // story pulses (and persons) extracted from it trace back via EXTRACTED_FROM.
-  // Without this label whitelisted, "what documents led to these resources?"
-  // was a silent dead end — the generator could neither name :Document nor
-  // traverse to it. Its human label is `filename`.
-  'Document',
 ] as const
 
 export type AllowedLabel = (typeof ALLOWED_LABELS)[number]
@@ -104,13 +98,14 @@ export const ALLOWED_RELATIONSHIPS = [
   'WEAVES',
   'WOVEN_FOR',
   'HAS_WEAVE',
-  // Document provenance edges. A FieldContext HAS_DOCUMENT each uploaded source
-  // doc; a pulse (or person) points at the doc it was EXTRACTED_FROM; the doc
-  // was UPLOADED_BY a member. These let the assistant answer "what documents
-  // are associated with these resources?" — a ResourcePulse reaches its source
-  // via (resource)-[:EXTRACTED_FROM]->(:Document). Node visibility stays gated
-  // by the post-execute Space filter (Document anchors through HAS_DOCUMENT).
-  'HAS_DOCUMENT',
+  // Document provenance edges (GOAL-354). A document is a ResourcePulse with
+  // resourceType 'document', attached to its field by the ordinary HAS_PULSE
+  // edge; a pulse or person points at the document it was EXTRACTED_FROM; the
+  // document was UPLOADED_BY a member. These let the assistant answer "what
+  // documents are associated with these resources?" — a ResourcePulse reaches
+  // its source via (resource)-[:EXTRACTED_FROM]->(:ResourcePulse). Node
+  // visibility stays gated by the post-execute Space filter, which now anchors
+  // documents through HAS_PULSE like any other pulse.
   'EXTRACTED_FROM',
   'UPLOADED_BY',
   // Pulse authorship — TWO live edges, written by different surfaces.
@@ -204,6 +199,14 @@ FieldContext { id, title, emergentName, createdAt }
 FieldPulse { id, title, content, status, intensity, horizon, why, location, time, createdAt }
   - Always co-labeled with one specific pulse subtype:
     GoalPulse, ResourcePulse, StoryPulse, CarePulse, CoreValuePulse.
+  - ResourcePulse additionally carries:
+      resourceType — free-text kind of resource, stored lower-cased
+        ('article', 'book', 'podcast', 'ontology', 'event', …). This is what
+        "show me the books / podcasts in this field" should filter on. It is
+        NOT an enum, so prefer toLower(p.resourceType) = 'book' over an exact
+        match, and never assume the full value set.
+      sourceUrl — where the resource was FOUND (a LinkedIn post, a
+        newsletter), as distinct from location, which is the resource itself.
 
 CORE VALUES — read this before writing any query about values.
   A "core value" / "value" is a pulse, but it does NOT always carry the
@@ -251,17 +254,18 @@ PromiseWeave { id, title, description, status, origin, createdAt, modifiedAt }
 
 FieldResonance { label, description } — semantic theme node.
 
-Document { id, filename, mimeType, summary, concepts, uploadedAt }
+ResourcePulse {resourceType: 'document'} { id, sourceFilename, sourceMimeType, sourceSummary, sourceConcepts, uploadedAt }
   - An uploaded SOURCE FILE (an article, PDF, note) attached to a FieldContext.
-    Its human label is "filename" — caption Documents by filename, never by id,
-    blobKey, or blobUrl (those are internal). When a member uploads articles
-    into a field, each article becomes a Document, and the ResourcePulses /
-    GoalPulses / StoryPulses (and Persons) the extractor pulled out of it point
-    back at the Document via EXTRACTED_FROM. This is how "the documents that led
-    to these resources" are reached. When the user asks about "documents",
-    "source documents", "uploaded files/articles", or "where a resource came
-    from", MATCH the \`:Document\` label — these nodes are invisible to any query
-    that omits it.
+    Its human label is "sourceFilename" — caption documents by sourceFilename (or
+    title, which is seeded from it), never by id,
+    sourceBlobKey or sourceBlobUrl (those are internal). When a member uploads
+    articles into a field, each article becomes a document RESOURCE, and the
+    ResourcePulses / GoalPulses / StoryPulses (and Persons) the extractor pulled
+    out of it point back at it via EXTRACTED_FROM. This is how "the documents
+    that led to these resources" are reached. When the user asks about
+    "documents", "source documents", "uploaded files/articles", or "where a
+    resource came from", MATCH \`(:ResourcePulse {resourceType: 'document'})\` —
+    a document is NOT its own label, it is a kind of Resource.
 
 # Relationships (directed)
 
@@ -283,10 +287,10 @@ Document { id, filename, mimeType, summary, concepts, uploadedAt }
 (PromiseWeave)-[:WEAVES]->(FieldPulse)     // the care point(s) it connects (1..n)
 (PromiseWeave)-[:WOVEN_FOR]->(Person)      // the person it concerns
 (PromiseWeave)-[:CREATED_BY]->(Person)     // authorship
-(FieldContext)-[:HAS_DOCUMENT]->(Document) // an uploaded source file attached to the field
-(FieldPulse)-[:EXTRACTED_FROM]->(Document) // the resource/goal/story pulse was extracted from this document — the "source document" for that pulse
-(Person)-[:EXTRACTED_FROM]->(Document)     // a person the extractor surfaced from this document
-(Document)-[:UPLOADED_BY]->(Person)        // the member who uploaded it (a :Person:User)
+(FieldContext)-[:HAS_PULSE]->(ResourcePulse {resourceType: 'document'}) // an uploaded source file attached to the field — a document is a Resource, reached by the ordinary pulse edge
+(FieldPulse)-[:EXTRACTED_FROM]->(ResourcePulse) // the resource/goal/story pulse was extracted from this document — the "source document" for that pulse
+(Person)-[:EXTRACTED_FROM]->(ResourcePulse)     // a person the extractor surfaced from this document
+(ResourcePulse)-[:UPLOADED_BY]->(Person)        // the member who uploaded it (a :Person:User)
 (FieldPulse)-[:INITIATED_BY]->(Person)   // canonical author edge — who made / is credited for this pulse. Written by the assistant + doc-ingest paths; doc-ingested pulses point at the extracted author (often a :Person:PersonPulse), not the uploader.
 (FieldPulse)-[:CREATED_BY]->(Person)     // same meaning, written by the dashboard create flow and imports. NEITHER edge alone covers all pulses — ALWAYS match authorship as [:INITIATED_BY|CREATED_BY].
 (Person)-[:CONNECTED_TO]-(Person)  // bidirectional
@@ -327,7 +331,7 @@ Intent phrasing → edge:
 - "values it aligns to" → ALIGNED_TO (a CoreValuePulse)
 - "who is motivated by / provides this" → MOTIVATED_BY / PROVIDES (a Person)
 - "who created / authored / added this pulse" / "pulses by <person>" / "<person>'s contributions" → (FieldPulse)-[:INITIATED_BY|CREATED_BY]->(Person)
-- "documents" / "source documents" / "uploaded files/articles" / "what documents led to these resources" / "where did this resource come from" → (:Document), reached via (:FieldContext)-[:HAS_DOCUMENT]->(:Document) for a field's docs, and via (:FieldPulse)-[:EXTRACTED_FROM]->(:Document) for the source doc(s) behind specific pulses
+- "documents" / "source documents" / "uploaded files/articles" / "what documents led to these resources" / "where did this resource come from" → (:ResourcePulse {resourceType: 'document'}), reached via (:FieldContext)-[:HAS_PULSE]->(:ResourcePulse {resourceType: 'document'}) for a field's docs, and via (:FieldPulse)-[:EXTRACTED_FROM]->(:ResourcePulse) for the source doc(s) behind specific pulses. A document is a KIND OF RESOURCE, not its own label
 
 NOTE on HAS_MEMBER: it has two valid domains.
   (Space)-[:HAS_MEMBER]->(SpaceMembership)  // Space membership goes through a SpaceMembership node carrying the role

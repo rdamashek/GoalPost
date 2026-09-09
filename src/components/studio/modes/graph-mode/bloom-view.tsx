@@ -33,11 +33,27 @@ import { useIsDarkMode, useNvlTouchGestures } from '@/hooks'
 import { useRouteFocalScope } from '@/lib/focal-entity/use-route-focal-scope'
 import type { FocalEntityType } from '@/lib/focal-entity/types'
 import type { NvlRefHandle } from '@/components/graph/visualizer'
-import { lightColorFor, UNKNOWN_NODE_STYLE } from '@/lib/cypher-generator/node-style'
 import { GraphLoadingState } from './graph-loading-state'
 import { BloomLegend } from './bloom-legend'
-import { DocumentLayerToggle } from './document-layer-toggle'
 import { getBloomPalette } from './bloom-palette'
+import {
+  buildBloomCanvas,
+  type BloomGraphInput,
+  type FieldContextRecord,
+  type NamedEntity,
+  type PersonRecord,
+  type PulseAuthorRecord,
+  type PulseRecord,
+  type ResonanceRecord,
+  type SpacePersonRecord,
+  type SpaceRecord,
+  type WeaveRecord,
+} from './bloom-graph-builder'
+import {
+  applyBloomTypeFilters,
+  DOCUMENT_TYPE_KEY,
+} from './bloom-type-registry'
+import { useBloomTypeFilters } from './use-bloom-type-filters'
 import {
   buildDocumentProvenanceLayer,
   documentDerivedIds,
@@ -89,11 +105,10 @@ const GraphVisualizer = dynamic(
   }
 )
 
-const EMPTY_RELATIONSHIPS: Relationship[] = []
 /**
  * Stable identity for "nothing is hidden". It is what lets
- * `applyDocumentHiding` return the built graph by identity in the default view
- * (documents ON), which in turn keeps the fit-to-scope effects keyed on
+ * `applyDocumentHiding` return the built graph by identity when the Documents
+ * row is switched on, which in turn keeps the fit-to-scope effects keyed on
  * `nodes` from re-firing on every render.
  */
 const EMPTY_IDS: ReadonlySet<string> = new Set<string>()
@@ -257,25 +272,6 @@ function resolveOverlayEntityType(
   )
 }
 
-const SPACE_SIZE = {
-  MeSpace: 44,
-  WeSpace: 48,
-} as const
-
-const FIELD_SIZE = 36
-
-// The active field rendered as the hub its nested fields hang off in-field —
-// slightly larger than its children so the hierarchy reads at a glance
-// (GOAL-339).
-const FIELD_ANCHOR_SIZE = 42
-
-const PULSE_SIZE = 32
-
-const PERSON_SIZE = 30
-// The root "You" hub reads slightly larger than its spokes — it's the
-// identity node every space radiates from.
-const YOU_SIZE = 44
-
 // Minimal read shape for the owner/member person fields on the space
 // queries — the generated MeSpace | WeSpace union is awkward to narrow inline.
 type RawPersonLite = {
@@ -298,67 +294,6 @@ function composeName(p: {
 }): string {
   const composed = `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim()
   return p.name?.trim() || composed || 'Unnamed'
-}
-
-interface SpaceRecord {
-  id: string
-  name: string
-  type: 'MeSpace' | 'WeSpace'
-}
-
-interface FieldContextRecord {
-  id: string
-  name: string
-  spaceKind: 'MeSpace' | 'WeSpace'
-  /** Direct parent context when this field is nested (GOAL-295). */
-  parentId: string | null
-}
-
-interface PulseRecord {
-  id: string
-  name: string
-  pulseType: 'goal' | 'resource' | 'story' | 'care' | 'coreValue'
-  focalType: FocalEntityType
-}
-
-interface ResonanceRecord {
-  id: string
-  sourceId: string
-  targetId: string
-  label: string
-}
-
-// A PromiseWeave rendered in-field: the connector node plus the ids of the
-// pulses it weaves. Unlike a resonance (a pulse↔pulse edge), a weave is its
-// own hub node with WEAVES spokes to each pulse it connects.
-interface WeaveRecord {
-  id: string
-  name: string
-  wovenPulseIds: string[]
-  /**
-   * True for a `proposed` weave — one the assistant suggested that no member
-   * has confirmed yet (kb/04-state-machines.md). The canvas MUST NOT draw it
-   * identically to an agreed weave: every other weave surface distinguishes
-   * the two, and a hub that looks established is the canvas asserting a
-   * connection nobody made.
-   */
-  awaitingReview: boolean
-}
-
-interface PersonRecord {
-  id: string
-  name: string
-  // Owner is a User; field-attached people are PersonPulses. We branch the
-  // focal-entity machinery on this distinction.
-  focalType: 'User' | 'PersonPulse'
-}
-
-// In-space people carry their relationship to the space so the hub-and-spoke
-// edge picks the right caption (owns vs member).
-interface SpacePersonRecord {
-  id: string
-  name: string
-  role: 'OWNER' | 'MEMBER'
 }
 
 export const BloomView: FC = () => {
@@ -465,15 +400,17 @@ export const BloomView: FC = () => {
     }
   )
 
-  // ON by default. It shipped off to keep a document-heavy field from burying
-  // its pulses, but that default was the worse trade: a person a document
-  // named has provenance as their ONLY tie to anything, so with the layer off
-  // they render as edgeless dots — 12 of the 14 people on one real field.
-  // The canvas opened on exactly the floating-people problem this feature was
-  // built to fix. GOAL-350 folds this into a general per-type toggle list;
-  // until then it is deliberately shaped as one named layer rather than an
-  // ad-hoc boolean.
-  const [showDocumentProvenance, setShowDocumentProvenance] = useState(true)
+  // Per-type visibility (GOAL-350). Every node and relationship type on the
+  // canvas is independently switchable from the legend; Documents is simply
+  // the row that starts off (GOAL-346's default, now expressed through this
+  // model rather than as its own boolean). Purely presentational — nothing
+  // here changes what is fetched or what the viewer is authorized to see.
+  //
+  // `applyDefaults` is off under an overlay: the Documents default exists for
+  // the volume of the NATIVE in-field layer, whereas an overlay is a subgraph
+  // the member explicitly asked the assistant for — pruning Documents out of
+  // it before they touch a control would discard what was requested.
+  const typeFilters = useBloomTypeFilters({ applyDefaults: !overlay })
 
   const loading = inField
     ? fieldDetailsLoading
@@ -536,7 +473,7 @@ export const BloomView: FC = () => {
   // anchor so members can see and drill into nesting without leaving the
   // canvas. Read off the same GET_FIELD_CONTEXT_DETAILS payload the
   // dashboard page warmed — Bloom never fetches its own data (ADR-011).
-  const subContexts = useMemo<Array<{ id: string; name: string }>>(() => {
+  const subContexts = useMemo<NamedEntity[]>(() => {
     if (!inField || !fieldDetailsData) return []
     const context = fieldDetailsData.fieldContexts?.[0]
     const list = (context?.subContexts ?? []) as Array<{
@@ -670,12 +607,18 @@ export const BloomView: FC = () => {
     return fieldCtx?.curatedPersonIds ?? []
   }, [fieldPeopleData])
 
-  // Everything the canvas drops while the Documents layer is OFF: the
+  // Everything the canvas drops when the Documents row is switched OFF: the
   // documents, the people they named, and the pulses they produced. See
   // `documentDerivedIds` for why "off" is the whole subgraph and not just the
   // Document hubs.
+  //
+  // GOAL-350 moved the on/off decision into the per-type filter, but the RULE
+  // stays here and stays id-based: `applyBloomTypeFilters` hides a type by
+  // colour, which reaches the Document hubs and their EXTRACTED_FROM edges but
+  // not the people and pulses those documents produced — those are painted as
+  // ordinary people and pulses. Only provenance knows which ones they are.
   const hiddenDocumentIds = useMemo<ReadonlySet<string>>(() => {
-    if (!inField || showDocumentProvenance) return EMPTY_IDS
+    if (!inField || !typeFilters.hidden.has(DOCUMENT_TYPE_KEY)) return EMPTY_IDS
     const documents = (
       fieldDocumentsData as
         | { documentsByFieldContext?: ProvenanceDocument[] }
@@ -688,30 +631,22 @@ export const BloomView: FC = () => {
     })
   }, [
     inField,
-    showDocumentProvenance,
+    typeFilters.hidden,
     fieldDocumentsData,
     curatedPersonIds,
     anchoredPersonIds,
   ])
 
-  // Drives the toggle's badge and its hidden-at-zero rule. Counts what the
-  // field HAS, not what the layer drew — the layer omits a document whose
-  // people are all off-canvas, and a count that shrank when you switched the
-  // layer on would read as a bug.
-  const fieldDocumentCount = useMemo(() => {
-    return (
-      (
-        fieldDocumentsData as
-          | { documentsByFieldContext?: unknown[] }
-          | undefined
-      )?.documentsByFieldContext?.length ?? 0
-    )
-  }, [fieldDocumentsData])
-
-  // GOAL-346: Document nodes + EXTRACTED_FROM edges. Built here so both the
-  // node and relationship memos below consume one derivation and cannot
-  // disagree about which documents made it onto the canvas — the invariant
-  // that keeps NVL from being handed an edge to a node that isn't rendered.
+  // GOAL-346: Document nodes + EXTRACTED_FROM edges. Built here so both
+  // builders below consume one derivation and cannot disagree about which
+  // documents made it onto the canvas — the invariant that keeps NVL from
+  // being handed an edge to a node that isn't rendered.
+  //
+  // Built whenever the scope is in-field, NOT only when Documents are switched
+  // on: since GOAL-350 the on/off decision belongs to the type filter, and a
+  // type has to be on the built canvas for the legend to derive a toggle for
+  // it at all. The layer is cheap — a node per document plus edges to people
+  // already rendered, with no extra fetch behind it (ADR-011).
   const documentProvenance = useMemo(() => {
     const documents = (
       fieldDocumentsData as
@@ -722,10 +657,9 @@ export const BloomView: FC = () => {
       documents,
       visiblePersonIds: new Set(persons.map((p) => p.id)),
       palette,
-      // Built whenever we are in a field, INDEPENDENT of the toggle. The
-      // toggle is applied once, further down, as a visibility pass over the
-      // finished graph — and that pass needs the EXTRACTED_FROM edges present
-      // to see which people it strands by removing them.
+      // Applied once, further down, as a visibility pass over the finished
+      // graph — and that pass needs the EXTRACTED_FROM edges present to see
+      // which people it strands by removing them.
       visible: inField,
     })
   }, [fieldDocumentsData, persons, palette, inField])
@@ -885,445 +819,118 @@ export const BloomView: FC = () => {
     return { id: activeSpaceId, name: space.name || 'Space', kind }
   }, [inSpace, activeSpaceId, spaceDetailsData])
 
-  // Native NVL nodes — caption / color / size only. NVL paints these
-  // directly without any HTML container; that's the "minimal GoalPost
-  // opinionation" the kb calls out.
-  //
-  // No x/y is set on any node: with `layout: 'forceDirected'`, supplying
-  // positions makes NVL treat the layout as already-settled and the
-  // simulation never runs until the user disturbs a node. Letting NVL
-  // place everything from scratch is what makes the force-directed shape
-  // appear on first load.
-  //
-  // Precedence:
-  //   1. Overlay (chat-pushed subgraph) — always wins; cleared via the
-  //      "Custom view from chat" chip in the canvas header.
-  //   2. In-field scope — the active FieldContext's pulses.
-  //   3. In-space scope — the active Space's field contexts.
-  //   4. Default — the user's MeSpace + WeSpace cluster.
-  const candidateNodes: Node[] = useMemo(() => {
-    if (overlay) {
-      // The overlay payload is styled server-side (cypher-generator/execute.ts)
-      // with the dark pastel palette — the executor can't know the viewer's
-      // theme. Remap to the light counterparts here so a chat "custom view"
-      // doesn't dissolve into a light backdrop. Only the *painted* color is
-      // remapped; `overlay.nodes[].color` keeps its original value, which is
-      // what `colorToInfoEntityType` resolves clicks against.
-      return overlay.nodes.map(
-        (n) => {
-          const color = n.color ?? UNKNOWN_NODE_STYLE.color
-          return {
-            id: n.id,
-            caption: n.caption ?? n.id,
-            color: isDark ? color : lightColorFor(color),
-            size: n.size ?? 30,
-          } as Node
-        }
-      )
+  // The author of each in-field pulse. Authorship lives on TWO live edges
+  // (INITIATED_BY: assistant/doc-ingest paths; CREATED_BY: dashboard flow,
+  // imports), so mirror resolvePulseAuthor (src/lib/pulse-author.ts): prefer
+  // initiatedBy, fall back to createdBy — else dashboard-created pulses render
+  // authorless. The generated GraphQL types don't surface these fields, so we
+  // read them through a narrow cast.
+  const pulseAuthors: PulseAuthorRecord[] = useMemo(() => {
+    if (!inField || !fieldDetailsData) return []
+    type PulseWithAuthorIds = {
+      id: string
+      initiatedBy?: Array<{ id: string }> | null
+      createdBy?: Array<{ id: string }> | null
     }
-    if (inField) {
-      const pulseNodes = pulses.map(
-        (pulse) =>
-          ({
-            id: pulse.id,
-            caption: pulse.name,
-            color: palette.pulse[pulse.pulseType],
-            size: PULSE_SIZE,
-          }) as Node
-      )
-      const personNodes = persons.map(
-        (person) =>
-          ({
-            id: person.id,
-            caption: person.name,
-            color: palette.person,
-            size: PERSON_SIZE,
-          }) as Node
-      )
-      // NVL renders `caption` and nothing else per node, so the proposed state
-      // rides in the caption. A separate colour would need its own palette
-      // entry AND a legend row to be decodable, where the suffix is legible in
-      // every theme and both modes for free.
-      const weaveNodes = weaves.map(
-        (weave) =>
-          ({
-            id: weave.id,
-            caption: weave.awaitingReview
-              ? `${weave.name} (proposed)`
-              : weave.name,
-            color: palette.weaveNode,
-            size: PULSE_SIZE,
-          }) as Node
-      )
-      // Nested fields hang off the field anchor (GOAL-339). Children reuse
-      // the in-space field tint so the existing "Field context" legend row
-      // decodes them without a palette change.
-      const anchorNodes: Node[] = fieldAnchor
-        ? [
-            {
-              id: fieldAnchor.id,
-              caption: fieldAnchor.name,
-              color: palette.field[inFieldSpaceKind],
-              size: FIELD_ANCHOR_SIZE,
-            } as Node,
-          ]
-        : []
-      const subContextNodes = subContexts.map(
-        (sub) =>
-          ({
-            id: sub.id,
-            caption: sub.name,
-            color: palette.field[inFieldSpaceKind],
-            size: FIELD_SIZE,
-          }) as Node
-      )
-      return [
-        ...pulseNodes,
-        ...personNodes,
-        ...weaveNodes,
-        ...anchorNodes,
-        ...subContextNodes,
-        // Empty unless the Documents layer is switched on (GOAL-346).
-        ...documentProvenance.nodes,
-      ]
-    }
-    if (inSpace) {
-      // Hub-and-spoke: the space anchors the cluster, its field contexts and
-      // owner/members radiate off it via the structural edges below.
-      const anchorNode: Node[] = spaceAnchor
-        ? [
-            {
-              id: spaceAnchor.id,
-              caption: spaceAnchor.name,
-              color: palette.space[spaceAnchor.kind],
-              size: SPACE_SIZE[spaceAnchor.kind],
-            } as Node,
-          ]
-        : []
-      const fieldNodes = fieldContexts.map(
-        (ctx) =>
-          ({
-            id: ctx.id,
-            caption: ctx.name,
-            color: palette.field[ctx.spaceKind],
-            size: FIELD_SIZE,
-          }) as Node
-      )
-      const peopleNodes = inSpacePeople.map(
-        (p) =>
-          ({
-            id: p.id,
-            caption: p.name,
-            color: palette.person,
-            size: PERSON_SIZE,
-          }) as Node
-      )
-      return [...anchorNode, ...fieldNodes, ...peopleNodes]
-    }
-    // Root: the current user is the hub; each space hangs off it.
-    const spaceNodes = spaces.map(
-      (space) =>
-        ({
-          id: space.id,
-          caption: space.name,
-          color: palette.space[space.type],
-          size: SPACE_SIZE[space.type],
-        }) as Node
-    )
-    const youNode: Node[] =
-      currentUserId && spaces.length > 0
-        ? [
-            {
-              id: currentUserId,
-              caption: 'You',
-              color: palette.person,
-              size: YOU_SIZE,
-            } as Node,
-          ]
-        : []
-    return [...youNode, ...spaceNodes]
-  }, [
-    overlay,
-    isDark,
-    palette,
-    inField,
-    pulses,
-    persons,
-    weaves,
-    subContexts,
-    fieldAnchor,
-    inFieldSpaceKind,
-    documentProvenance,
-    inSpace,
-    fieldContexts,
-    spaces,
-    spaceAnchor,
-    inSpacePeople,
-    currentUserId,
-  ])
+    const allPulses = [
+      ...((fieldDetailsData.goalPulses ?? []) as PulseWithAuthorIds[]),
+      ...((fieldDetailsData.resourcePulses ?? []) as PulseWithAuthorIds[]),
+      ...((fieldDetailsData.storyPulses ?? []) as PulseWithAuthorIds[]),
+      ...((fieldDetailsData.carePulses ?? []) as PulseWithAuthorIds[]),
+      ...((fieldDetailsData.coreValuePulses ?? []) as PulseWithAuthorIds[]),
+    ]
+    return allPulses.flatMap((pulse) => {
+      const authorId = pulse.initiatedBy?.[0]?.id ?? pulse.createdBy?.[0]?.id
+      return authorId ? [{ pulseId: pulse.id, authorId }] : []
+    })
+  }, [inField, fieldDetailsData])
 
-  const candidateRelationships: Relationship[] = useMemo(() => {
-    // Dedupe defensively on `from|type|to` even when the backend should
-    // already be sending unique edges — both the cypher-generator overlay
-    // path and the Apollo resonance path have produced duplicates before,
-    // and a doubled edge is more visually misleading than a missing one.
-    const dedupe = (rels: Relationship[]): Relationship[] => {
-      const seen = new Set<string>()
-      const out: Relationship[] = []
-      for (const r of rels) {
-        const key = `${r.from}|${r.caption ?? ''}|${r.to}`
-        if (seen.has(key)) continue
-        seen.add(key)
-        out.push(r)
-      }
-      return out
-    }
-    if (overlay) {
-      return dedupe(
-        overlay.relationships.map(
-          (r) =>
-            ({
-              id: r.id,
-              from: r.from,
-              to: r.to,
-              caption: r.caption ?? '',
-            }) as Relationship
+  // Spaces the current user owns — their MeSpace plus any WeSpace they
+  // created. Drives whether a root spoke reads `owns` or `member`.
+  const ownedSpaceIds = useMemo<ReadonlySet<string>>(() => {
+    return new Set<string>([
+      ...(meData?.meSpaces ?? []).map((s) => s.id),
+      ...(weData?.weSpaces ?? [])
+        .filter(
+          (s) =>
+            firstOf(
+              (s as { owner?: RawPersonLite | RawPersonLite[] | null }).owner
+            )?.id === currentUserId
         )
-      )
-    }
-    if (inField) {
-      // Endpoints that are actually rendered. Edges to anything off-screen
-      // (a resonance into an inaccessible pulse, an initiator whose person
-      // node didn't load) are dropped so NVL never draws a dangling arrow.
-      const visibleIds = new Set<string>([
-        ...pulses.map((p) => p.id),
-        ...persons.map((p) => p.id),
-      ])
-      const edges: Relationship[] = []
+        .map((s) => s.id),
+    ])
+  }, [meData, weData, currentUserId])
 
-      // RESONATES_WITH — pulse↔pulse semantic links. Built unconditionally
-      // now (previously gated on `resonances.length > 0`); the dedupe below
-      // handles the empty case, and most fields have zero resonances, so the
-      // old guard is what made Bloom look edge-less next to the Graph view.
-      for (const r of resonances) {
-        if (!visibleIds.has(r.sourceId) || !visibleIds.has(r.targetId)) continue
-        edges.push({
-          id: `resonance-${r.id}`,
-          from: r.sourceId,
-          to: r.targetId,
-          caption: r.label,
-          color: palette.resonanceEdge,
-          width: 2,
-        } as Relationship)
-      }
+  // Everything the canvas is built from, in one bag. Construction itself lives
+  // in `bloom-graph-builder.ts` as a pure derivation — see that module's
+  // header for why it is not inline here.
+  const graphInput: BloomGraphInput = useMemo(
+    () => ({
+      overlay,
+      isDark,
+      palette,
+      inField,
+      inSpace,
+      pulses,
+      persons,
+      weaves,
+      resonances,
+      connections,
+      pulseAuthors,
+      subContexts,
+      fieldAnchor,
+      inFieldSpaceKind,
+      documentProvenance,
+      fieldContexts,
+      spaceAnchor,
+      inSpacePeople,
+      spaces,
+      currentUserId,
+      ownedSpaceIds,
+    }),
+    [
+      overlay,
+      isDark,
+      palette,
+      inField,
+      inSpace,
+      pulses,
+      persons,
+      weaves,
+      resonances,
+      connections,
+      pulseAuthors,
+      subContexts,
+      fieldAnchor,
+      inFieldSpaceKind,
+      documentProvenance,
+      fieldContexts,
+      spaceAnchor,
+      inSpacePeople,
+      spaces,
+      currentUserId,
+      ownedSpaceIds,
+    ]
+  )
 
-      // Author edge — pulse → the person credited for it. Authorship lives
-      // on TWO live edges (INITIATED_BY: assistant/doc-ingest paths;
-      // CREATED_BY: dashboard flow, imports), so mirror resolvePulseAuthor
-      // (src/lib/pulse-author.ts): prefer initiatedBy, fall back to
-      // createdBy — else dashboard-created pulses render authorless. The
-      // generated GraphQL types don't surface these fields, so we read them
-      // through a narrow cast.
-      type PulseWithAuthorIds = {
-        id: string
-        initiatedBy?: Array<{ id: string }> | null
-        createdBy?: Array<{ id: string }> | null
-      }
-      const allPulses = [
-        ...((fieldDetailsData?.goalPulses ?? []) as Array<PulseWithAuthorIds>),
-        ...((fieldDetailsData?.resourcePulses ??
-          []) as Array<PulseWithAuthorIds>),
-        ...((fieldDetailsData?.storyPulses ?? []) as Array<PulseWithAuthorIds>),
-        ...((fieldDetailsData?.carePulses ?? []) as Array<PulseWithAuthorIds>),
-        ...((fieldDetailsData?.coreValuePulses ??
-          []) as Array<PulseWithAuthorIds>),
-      ]
-      for (const pulse of allPulses) {
-        if (!visibleIds.has(pulse.id)) continue
-        const initiatorId =
-          pulse.initiatedBy?.[0]?.id ?? pulse.createdBy?.[0]?.id
-        if (!initiatorId || !visibleIds.has(initiatorId)) continue
-        edges.push({
-          id: `initiated-by-${pulse.id}-${initiatorId}`,
-          from: pulse.id,
-          to: initiatorId,
-          caption: 'initiated',
-          color: palette.initiatedEdge,
-          width: 1.5,
-        } as Relationship)
-      }
+  // The full canvas, before any type filter. The legend derives its rows from
+  // THIS — a type you switch off has to keep its row, or there is no way back.
+  const builtCanvas = useMemo(() => buildBloomCanvas(graphInput), [graphInput])
 
-      // WEAVES — each PromiseWeave hub → the pulses it connects. The weave node
-      // is always rendered (added to `nodes` above), so we only guard the pulse
-      // endpoint against the visible set to avoid a dangling spoke.
-      for (const w of weaves) {
-        for (const pid of w.wovenPulseIds) {
-          if (!visibleIds.has(pid)) continue
-          edges.push({
-            id: `weaves-${w.id}-${pid}`,
-            from: w.id,
-            to: pid,
-            caption: 'weaves',
-            color: palette.weaveEdge,
-            width: 1.5,
-          } as Relationship)
-        }
-      }
-
-      // EXTRACTED_FROM — each Document out to the people it named (GOAL-346).
-      // The layer already filtered its person endpoints against the same
-      // person set `visibleIds` is built from, and only emits a document that
-      // kept at least one, so these need no further guard here.
-      edges.push(...documentProvenance.relationships)
-
-      // CONNECTED_TO — interpersonal relationships between the people in this
-      // field (including the user↔person relationships, e.g. "your wife"). Both
-      // endpoints must be on canvas; the owner/user is rendered as a field
-      // person so user↔person relationships draw correctly.
-      for (const c of connections) {
-        if (!visibleIds.has(c.fromId) || !visibleIds.has(c.toId)) continue
-        edges.push({
-          id: `connected-${[c.fromId, c.toId].sort().join('-')}`,
-          from: c.fromId,
-          to: c.toId,
-          caption: 'connected',
-          color: palette.connectedEdge,
-          width: 1.5,
-        } as Relationship)
-      }
-
-      // HAS_SUBCONTEXT — the field anchor out to each nested field
-      // (GOAL-339). Both endpoints are always rendered (the anchor only
-      // materializes when sub-contexts exist), so no visibility guard.
-      if (fieldAnchor) {
-        for (const sub of subContexts) {
-          edges.push({
-            id: `subcontext-${fieldAnchor.id}-${sub.id}`,
-            from: fieldAnchor.id,
-            to: sub.id,
-            caption: 'nested',
-            color: palette.structuralEdge,
-            width: 1.5,
-          } as Relationship)
-        }
-      }
-
-      return dedupe(edges)
-    }
-    if (inSpace && spaceAnchor) {
-      // Space —has→ each field context; owner/member —owns|member→ space.
-      const visibleIds = new Set<string>([
-        spaceAnchor.id,
-        ...fieldContexts.map((f) => f.id),
-        ...inSpacePeople.map((p) => p.id),
-      ])
-      const edges: Relationship[] = []
-      // A nested field hangs off its parent field, not the space anchor, so
-      // the hierarchy reads correctly (GOAL-339 — previously every context
-      // rendered flat off the space even when nested). Falls back to the
-      // space edge if the parent isn't on canvas.
-      const contextIds = new Set(fieldContexts.map((f) => f.id))
-      for (const ctx of fieldContexts) {
-        const nestedParentId =
-          ctx.parentId && contextIds.has(ctx.parentId) ? ctx.parentId : null
-        edges.push(
-          nestedParentId
-            ? ({
-                id: `subcontext-${nestedParentId}-${ctx.id}`,
-                from: nestedParentId,
-                to: ctx.id,
-                caption: 'nested',
-                color: palette.structuralEdge,
-                width: 1.5,
-              } as Relationship)
-            : ({
-                id: `has-${spaceAnchor.id}-${ctx.id}`,
-                from: spaceAnchor.id,
-                to: ctx.id,
-                caption: 'has',
-                color: palette.structuralEdge,
-                width: 1.5,
-              } as Relationship)
-        )
-      }
-      for (const p of inSpacePeople) {
-        if (!visibleIds.has(p.id)) continue
-        const owns = p.role === 'OWNER'
-        edges.push({
-          id: `${owns ? 'owns' : 'member'}-${p.id}-${spaceAnchor.id}`,
-          from: p.id,
-          to: spaceAnchor.id,
-          caption: owns ? 'owns' : 'member',
-          color: palette.structuralEdge,
-          width: 1.5,
-        } as Relationship)
-      }
-      return dedupe(edges)
-    }
-    if (!inField && !inSpace) {
-      // Root: the current user is the hub; each visible space hangs off it
-      // with an `owns` (MeSpace, or a WeSpace they created) or `member`
-      // (a WeSpace they only belong to) edge.
-      if (!currentUserId || spaces.length === 0) return EMPTY_RELATIONSHIPS
-      const ownedIds = new Set<string>([
-        ...(meData?.meSpaces ?? []).map((s) => s.id),
-        ...(weData?.weSpaces ?? [])
-          .filter(
-            (s) =>
-              firstOf(
-                (s as { owner?: RawPersonLite | RawPersonLite[] | null }).owner
-              )?.id === currentUserId
-          )
-          .map((s) => s.id),
-      ])
-      const edges: Relationship[] = spaces.map((space) => {
-        const owns = ownedIds.has(space.id)
-        return {
-          id: `${owns ? 'owns' : 'member'}-${currentUserId}-${space.id}`,
-          from: currentUserId,
-          to: space.id,
-          caption: owns ? 'owns' : 'member',
-          color: palette.structuralEdge,
-          width: 1.5,
-        } as Relationship
-      })
-      return dedupe(edges)
-    }
-    return EMPTY_RELATIONSHIPS
-  }, [
-    overlay,
-    palette,
-    inField,
-    resonances,
-    pulses,
-    persons,
-    weaves,
-    connections,
-    subContexts,
-    fieldAnchor,
-    fieldDetailsData,
-    documentProvenance,
-    inSpace,
-    spaceAnchor,
-    fieldContexts,
-    inSpacePeople,
-    currentUserId,
-    spaces,
-    meData,
-    weData,
-  ])
-
-  // What actually reaches NVL. The candidate graph above is the field as it
-  // stands, documents and all; this removes the document-derived subgraph when
-  // the toggle is off and sweeps up whatever that strands (see
-  // `applyDocumentHiding`). Nodes and edges are filtered together in one pass,
-  // which is what keeps the "no relationship without both endpoints rendered"
-  // invariant from depending on two memos agreeing with each other.
-  const { nodes, relationships } = useMemo(
+  // Documents are hidden by ID, not by colour, and that pass runs FIRST.
+  //
+  // `applyBloomTypeFilters` resolves a type from a node's paint, which reaches
+  // the Document hubs and their EXTRACTED_FROM edges but not the people and
+  // pulses those documents produced — those are painted as ordinary people and
+  // pulses (GOAL-346). Sweeping before the type filter is also what keeps the
+  // stranding rule honest: `applyDocumentHiding` decides who was left hanging
+  // by comparing against the edges that existed BEFORE the hiding, so it has
+  // to see the EXTRACTED_FROM edges still in place.
+  const sweptCanvas = useMemo(
     () =>
       applyDocumentHiding({
-        nodes: candidateNodes,
-        relationships: candidateRelationships,
+        nodes: builtCanvas.nodes,
+        relationships: builtCanvas.relationships,
         hiddenIds: hiddenDocumentIds,
         // The field's own pulses are never swept for being stranded. A pulse
         // that ingestion did NOT create can still have an extracted person as
@@ -1332,7 +939,17 @@ export const BloomView: FC = () => {
         // the field whoever is credited on it, so it stays, unattached.
         protectedIds: new Set(pulses.map((p) => p.id)),
       }),
-    [candidateNodes, candidateRelationships, hiddenDocumentIds, pulses]
+    [builtCanvas, hiddenDocumentIds, pulses]
+  )
+
+  // What NVL actually paints. A pure presentational transform: it drops the
+  // types switched off in the legend and re-guards every surviving edge
+  // against the surviving nodes, so hiding a node type cascades to its edges
+  // and NVL is never handed a dangling arrow. Nothing is refetched (ADR-011),
+  // and nothing here is an authorization decision (kb/02-user-roles.md).
+  const { nodes, relationships } = useMemo(
+    () => applyBloomTypeFilters(sweptCanvas, typeFilters.hidden),
+    [sweptCanvas, typeFilters.hidden]
   )
 
   // Publish whatever Bloom is currently rendering so the assistant can
@@ -1814,6 +1431,15 @@ export const BloomView: FC = () => {
     setSelectedNode(null)
   }
 
+  // A stable string for the current filter state. Only the layout-restart key
+  // below consumes it — the fit is deliberately NOT re-keyed on it, so
+  // toggling a type re-settles the simulation without yanking the viewer's
+  // pan and zoom back to a full-graph fit.
+  const filterSignature = useMemo(
+    () => [...typeFilters.hidden].sort().join(','),
+    [typeFilters.hidden]
+  )
+
   // Fit once per scope. The force simulation calls `onLayoutDone` when it
   // settles — that's when fit() lands on real positions instead of
   // whitespace. A long fallback timeout covers the edge case where the
@@ -1834,7 +1460,13 @@ export const BloomView: FC = () => {
     // SAME scope (e.g. a nested field created from the action bar landing
     // via the background refetch) must also wake the simulation, or the
     // new bubble sits wherever NVL dropped it without settling (GOAL-339).
-    const kickKey = `${scopeKey}|${nodes.length}`
+    //
+    // The filter signature is part of the key too (GOAL-350). Count alone
+    // collides: hide a 2-node type, hide another 2-node type, switch the first
+    // back on, and the count returns to a value already kicked — so the
+    // re-added nodes would never get their simulation pass and would sit
+    // stacked wherever NVL dropped them.
+    const kickKey = `${scopeKey}|${nodes.length}|${filterSignature}`
     if (lastKickedScopeRef.current === kickKey) return
     if (nodes.length === 0) return
     const ref = nvlRef.current
@@ -1867,7 +1499,7 @@ export const BloomView: FC = () => {
     return () => {
       for (const id of timers) window.clearTimeout(id)
     }
-  }, [nodes, scopeKey])
+  }, [nodes, scopeKey, filterSignature])
 
   const fitToScope = useCallback(() => {
     if (lastFitScopeRef.current === scopeKey) return
@@ -1953,31 +1585,31 @@ export const BloomView: FC = () => {
     }
   }, [])
 
+  // Deliberately read off the SOURCE records, never off the painted `nodes`:
+  // a canvas emptied by the type filter is not an empty field, and telling a
+  // member "this field has no pulses yet" because they switched Goal off would
+  // be the canvas lying about what is there.
   const isEmpty =
     !overlay &&
     !loading &&
     (inField
-      ? // Exactly "NVL has nothing to draw". The old form counted pulses and
-        // weaves only, so a field carrying just people and documents replaced
-        // its canvas with "no pulses yet" — and, once the toggle could empty
-        // the canvas, told the user to switch documents back on to see a view
-        // it would have gone on refusing to draw.
-        nodes.length === 0
+      ? // "There is nothing to build a canvas from", read off the BUILT graph
+        // rather than the painted one. The old form counted pulses and weaves
+        // only, so a field carrying just people and documents replaced its
+        // canvas with "no pulses yet"; reading the painted `nodes` instead
+        // would swing the other way and say the same thing about a field whose
+        // types are merely switched off — that case is `isFilteredToNothing`.
+        builtCanvas.nodes.length === 0
       : inSpace
         ? fieldContexts.length === 0
         : spaces.length === 0)
 
-  // Distinguishes "this field is empty" from "this field is entirely made of
-  // documents and you switched them off". Without it a doc-only field reads as
-  // having no content at all, and the fix — the toggle sitting in the opposite
-  // corner — is left for the user to guess at.
-  //
-  // Keyed off the candidate graph rather than the toggle: nothing but the
-  // hiding pass can empty a non-empty field, so "we built nodes and none
-  // survived" is the precise condition, and it cannot fire while the layer is
-  // on (with nothing hidden the two graphs are the same object).
-  const emptiedByDocumentToggle =
-    isEmpty && inField && candidateNodes.length > 0
+  // The other half of that: there IS something to draw, but every type of it
+  // is switched off. Says so plainly and offers the way back, so a filtered
+  // canvas can never be mistaken for missing data — or for a permission
+  // boundary, which it is not (kb/02-user-roles.md).
+  const isFilteredToNothing =
+    !isEmpty && builtCanvas.nodes.length > 0 && nodes.length === 0
 
   return (
     <div className="relative w-full h-full bg-gp-surface dark:bg-gp-surface-dark flex">
@@ -2005,7 +1637,7 @@ export const BloomView: FC = () => {
       />
 
       <div ref={canvasWrapperRef} className="flex-1 relative">
-        {!overlay && loading && nodes.length === 0 ? (
+        {!overlay && loading && builtCanvas.nodes.length === 0 ? (
           <GraphLoadingState
             label="Bloom is gathering"
             subtitle={
@@ -2019,18 +1651,10 @@ export const BloomView: FC = () => {
         ) : isEmpty ? (
           <div className="absolute inset-0 z-10 flex flex-col items-center justify-center text-center px-6 pointer-events-none">
             <span className="material-symbols-outlined text-5xl text-gp-ink-soft/70 mb-3">
-              {emptiedByDocumentToggle
-                ? 'description'
-                : inField
-                  ? 'graphic_eq'
-                  : inSpace
-                    ? 'category'
-                    : 'hub'}
+              {inField ? 'graphic_eq' : inSpace ? 'category' : 'hub'}
             </span>
             <p className="text-sm text-gp-ink-muted max-w-md">
-              {emptiedByDocumentToggle
-                ? 'Everything on this field came from its documents. Switch Show Documents back on to see it.'
-                : inField
+              {inField
                   ? 'This field has no pulses yet. Add one from the dashboard view and it will appear here on the canvas.'
                   : inSpace
                     ? 'This space has no field contexts yet. Create one from the dashboard view and it will appear here on the canvas.'
@@ -2058,19 +1682,38 @@ export const BloomView: FC = () => {
           </div>
         )}
 
-        {/* Decodes the bare colored NVL circles. Derives its rows from the
-            same nodes/relationships above, so it only lists what's on screen. */}
-        <BloomLegend nodes={nodes} relationships={relationships} />
-
-        {/* GOAL-346: reveals Documents and everything extracted from them.
-            In-field only — the space and root views have no document scope. */}
-        {inField && (
-          <DocumentLayerToggle
-            active={showDocumentProvenance}
-            onToggle={setShowDocumentProvenance}
-            documentCount={fieldDocumentCount}
-          />
+        {isFilteredToNothing && (
+          /* pointer-events-none on the wrapper, matching the empty state
+             above: this is a full-bleed overlay, and without it the canvas
+             underneath would stop taking pan, zoom and drag. Only the reset
+             button takes clicks back. */
+          <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center px-6 text-center">
+            <span className="material-symbols-outlined mb-3 text-5xl text-gp-ink-soft/70">
+              filter_alt_off
+            </span>
+            <p className="max-w-md text-sm text-gp-ink-muted">
+              Everything on this canvas is switched off. That includes a field
+              whose content all came from its documents, when the Documents row
+              is off.
+            </p>
+            <button
+              type="button"
+              onClick={typeFilters.showAll}
+              className="gp-glass-hover pointer-events-auto mt-4 cursor-pointer rounded-full gp-glass border border-gp-primary/40 px-4 py-2 text-xs font-semibold text-gp-primary"
+            >
+              Show all types
+            </button>
+          </div>
         )}
+
+        {/* Decodes the bare colored NVL circles — and, since GOAL-350, switches
+            each type on and off. Rows come from the UNFILTERED canvas so a type
+            you hide keeps its row and its way back. */}
+        <BloomLegend
+          nodes={builtCanvas.nodes}
+          relationships={builtCanvas.relationships}
+          filters={typeFilters}
+        />
       </div>
 
       {/* Inline panel only for overlay nodes (chat artifacts with no

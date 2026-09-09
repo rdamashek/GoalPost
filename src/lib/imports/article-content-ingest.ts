@@ -21,10 +21,7 @@ import {
   buildArticleRowPlaceholder,
   normalizeArticleUrl,
 } from './article-import'
-import {
-  extractArticleText,
-  isReadableArticleText,
-} from './article-html-text'
+import { extractArticleText, isReadableArticleText } from './article-html-text'
 import {
   fetchArticleSource,
   type ArticleFetchResult,
@@ -68,8 +65,7 @@ import {
  * `sourceUrl` instead of fetching again.
  */
 
-export interface ArticleContentIngestDeps
-  extends DocumentIngestPipelineDependencies {
+export interface ArticleContentIngestDeps extends DocumentIngestPipelineDependencies {
   /** Injectable for tests; production uses `fetchArticleSource`. */
   fetchSource?: (url: string) => Promise<ArticleFetchResult>
   /**
@@ -160,7 +156,10 @@ function hostnameOf(url: string): string {
 }
 
 function buildDocumentFilename(title: string, extension: string): string {
-  const base = title.replace(/\s+/g, ' ').trim().slice(0, MAX_FILENAME_TITLE_CHARS)
+  const base = title
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAX_FILENAME_TITLE_CHARS)
   return `${base || 'article'}${extension}`
 }
 
@@ -206,7 +205,9 @@ function toStoredArticle(
     }
   }
   if (fetched.kind === 'html') {
-    const { text } = extractArticleText(decodeText(fetched.buffer, fetched.charset))
+    const { text } = extractArticleText(
+      decodeText(fetched.buffer, fetched.charset)
+    )
     if (!isReadableArticleText(text)) return null
     return {
       filename: buildDocumentFilename(rowTitle, '.txt'),
@@ -357,9 +358,10 @@ async function attachRowPulseToDocument(
  * `create_*` that hit its enrich-don't-duplicate path is an update, and a
  * MENTIONED_IN link is neither.
  */
-export function countArticleEntities(
-  executed: ExecutedToolCallRecord[]
-): { created: number; updated: number } {
+export function countArticleEntities(executed: ExecutedToolCallRecord[]): {
+  created: number
+  updated: number
+} {
   const landed = executed.filter(
     (call) =>
       call.result.success !== false && call.tool !== 'link_entity_to_pulse'
@@ -377,6 +379,13 @@ export async function ingestArticleForRow(
 ): Promise<ArticleRowExtraction> {
   // The same normalized form the row's pulse carries as `location`, so the
   // dedupe key and the fetched URL never disagree with what the member sees.
+  //
+  // NOTE (GOAL-355): this is deliberately `row.url` — the resource itself —
+  // and NOT `row.sourceUrl`, the sheet's new `source_url` column. Despite the
+  // name collision with this local, `row.sourceUrl` is store-and-display only
+  // and must never be fetched server-side: it is a member-supplied link that
+  // has been through no gate but the http(s) scheme check, so fetching it
+  // would hand the import worker an SSRF vector.
   const sourceUrl = normalizeArticleUrl(input.row.url) ?? input.row.url.trim()
   const rowTitle = input.row.title.trim()
   const label = PULSE_TYPE_LABEL[input.row.pulseType]
@@ -426,7 +435,8 @@ export async function ingestArticleForRow(
 
   const hostKey = `host:${hostnameOf(sourceUrl)}`
   const cachedFailure =
-    deps.fetchFailureCache?.get(sourceUrl) ?? deps.fetchFailureCache?.get(hostKey)
+    deps.fetchFailureCache?.get(sourceUrl) ??
+    deps.fetchFailureCache?.get(hostKey)
   if (cachedFailure) return cachedFailure
 
   const fetched = await (deps.fetchSource ?? fetchArticleSource)(sourceUrl)
@@ -441,7 +451,10 @@ export async function ingestArticleForRow(
 
   const stored = toStoredArticle(fetched, rowTitle)
   if (!stored) {
-    const unreadable = extraction('fetch_failed', ARTICLE_UNREADABLE_PAGE_MESSAGE)
+    const unreadable = extraction(
+      'fetch_failed',
+      ARTICLE_UNREADABLE_PAGE_MESSAGE
+    )
     deps.fetchFailureCache?.set(sourceUrl, unreadable)
     return unreadable
   }
@@ -528,7 +541,11 @@ export async function ingestArticleForRow(
   }
 
   if (run.extractionFailed) {
-    return extraction('extraction_failed', ARTICLE_EXTRACTION_FAILED_MESSAGE, counts)
+    return extraction(
+      'extraction_failed',
+      ARTICLE_EXTRACTION_FAILED_MESSAGE,
+      counts
+    )
   }
   return counts.created + counts.updated > 0
     ? extraction('extracted', null, counts)

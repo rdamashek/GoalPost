@@ -130,6 +130,10 @@ export async function purgeDeletedFieldContexts(
           WITH c, pulses, ctxLinks, collect(DISTINCT ctxSug) AS ctxSugs
           OPTIONAL MATCH (c)-[:HAS_WEAVE]->(weave:PromiseWeave)
           WITH c, pulses, ctxLinks, ctxSugs, collect(DISTINCT weave) AS weaves
+          // GOAL-354: documents are ResourcePulses and are already collected by
+          // the pulses branch above. This legacy branch stays only so a
+          // pre-migration environment still purges its :Document nodes and
+          // their blobs; it yields nothing once the migration has run.
           OPTIONAL MATCH (c)-[:HAS_DOCUMENT]->(doc:Document)
           WITH c, pulses, ctxLinks, ctxSugs, weaves, collect(DISTINCT doc) AS docs
           // Queued/finished bulk-import jobs (GOAL-326). They belong to this

@@ -7,7 +7,10 @@ import type {
   ArticleRowExtraction,
   ArticleRowOutcome,
 } from '@/lib/imports/article-import'
-import { getPulseTypeClass, getPulseTypeLabel } from './field-section-primitives'
+import {
+  getPulseTypeClass,
+  getPulseTypeLabel,
+} from './field-section-primitives'
 
 /**
  * Presentational pieces for the article import modal (GOAL-317): parsed-row
@@ -50,6 +53,31 @@ export function PreviewRowCard({ row }: { row: ArticleImportRowInput }) {
         </span>
         <span className="truncate">{row.url}</span>
       </div>
+      {/*
+        GOAL-355 — the two optional columns, shown only when the sheet carried
+        them. The preview is the human-in-the-loop gate, so a member who added
+        `resource_type` / `source_url` has to be able to see that they were read
+        and mapped before confirming. Same ink + 10px metadata treatment as the
+        lines above (not the semantic entity color, which fails WCAG AA at this
+        size in light mode), and each value truncates so a long URL cannot push
+        the card into horizontal overflow at 390px.
+      */}
+      {row.resourceType && (
+        <div className="mt-0.5 flex items-center gap-1 text-[10px] text-gp-ink-muted dark:text-gp-ink-soft min-w-0">
+          <span className="material-symbols-outlined text-[12px] shrink-0">
+            label
+          </span>
+          <span className="truncate">{row.resourceType}</span>
+        </div>
+      )}
+      {row.sourceUrl && (
+        <div className="mt-0.5 flex items-center gap-1 text-[10px] text-gp-ink-muted dark:text-gp-ink-soft min-w-0">
+          <span className="material-symbols-outlined text-[12px] shrink-0">
+            share
+          </span>
+          <span className="truncate">{row.sourceUrl}</span>
+        </div>
+      )}
     </div>
   )
 }
@@ -101,9 +129,7 @@ function extractionLine(extraction: ArticleRowExtraction): string {
           ? `added ${extraction.created} ${extraction.created === 1 ? 'entry' : 'entries'}`
           : ''
       const filled =
-        extraction.updated > 0
-          ? `filled in ${extraction.updated} existing`
-          : ''
+        extraction.updated > 0 ? `filled in ${extraction.updated} existing` : ''
       const parts = [added, filled].filter(Boolean).join(' and ')
       return parts ? `Read the article and ${parts}.` : 'Read the article.'
     }

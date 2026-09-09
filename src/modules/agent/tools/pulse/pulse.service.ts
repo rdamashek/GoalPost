@@ -279,7 +279,7 @@ async function searchPulsesByRelatedPerson(
       RETURN pulse AS relPulse, 0 AS relRank
       UNION
       WITH person
-      MATCH (pulse:FieldPulse)-[:EXTRACTED_FROM]->(:Document)<-[:EXTRACTED_FROM]-(person)
+      MATCH (pulse:FieldPulse)-[:EXTRACTED_FROM]->(:ResourcePulse)<-[:EXTRACTED_FROM]-(person)
       RETURN pulse AS relPulse, 1 AS relRank
       UNION
       WITH person

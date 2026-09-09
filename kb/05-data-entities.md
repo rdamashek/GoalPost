@@ -331,21 +331,22 @@ runs as. The blob pointers additionally carry `@selectable(onRead: false)`,
 not implied by the others, and ordering by a hidden field is a comparison oracle
 (the GOAL-275 lesson). **Any field added to that block must repeat all of these.**
 
-| Field        | Type     | Notes                       |
-| ------------ | -------- | --------------------------- |
-| id           | string   | Unique                      |
-| title        | string   | Required                    |
-| content      | string   | Required                    |
-| resourceType | string   | Required — type of resource |
-| availability | float    | Optional                    |
-| intensity    | float    | 0.0–1.0, optional           |
-| status       | string   | Optional                    |
-| why          | string   | Optional                    |
-| location     | string   | Optional                    |
-| time         | string   | Optional                    |
-| embedding    | float[]  | 1536-dim vector             |
-| createdAt    | datetime |                             |
-| modifiedAt   | datetime |                             |
+| Field        | Type     | Notes                                                                                                                                                                                                                                                                                                                        |
+| ------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| id           | string   | Unique                                                                                                                                                                                                                                                                                                                       |
+| title        | string   | Required                                                                                                                                                                                                                                                                                                                     |
+| content      | string   | Required                                                                                                                                                                                                                                                                                                                     |
+| resourceType | string   | Required — type of resource. Free text, not an enum: extensible by design (GOAL-354). Stored lower-cased by the bulk article import, which reads it from the sheet's `resource_type` column and falls back to `'article'` (GOAL-355)                                                                                            |
+| availability | float    | Optional                                                                                                                                                                                                                                                                                                                     |
+| intensity    | float    | 0.0–1.0, optional                                                                                                                                                                                                                                                                                                            |
+| status       | string   | Optional                                                                                                                                                                                                                                                                                                                     |
+| why          | string   | Optional                                                                                                                                                                                                                                                                                                                     |
+| location     | string   | Optional — the resource itself                                                                                                                                                                                                                                                                                               |
+| sourceUrl    | string   | Optional — where the resource was *found* (a LinkedIn post, a newsletter), as distinct from `location`. Written by the bulk article import from the sheet's `source_url` column (GOAL-355), and by document ingestion with the link an article's bytes were fetched from (GOAL-344) — where it doubles as that import's idempotency key. Member-correctable, unlike the rest of the source block. Its own property precisely so the doc-ingest summary that may replace a placeholder `content` can never overwrite it. Null elsewhere |
+| time         | string   | Optional                                                                                                                                                                                                                                                                                                                     |
+| embedding    | float[]  | 1536-dim vector                                                                                                                                                                                                                                                                                                              |
+| createdAt    | datetime |                                                                                                                                                                                                                                                                                                                              |
+| modifiedAt   | datetime |                                                                                                                                                                                                                                                                                                                              |
 
 **Source-file properties (GOAL-354).** Null on resources with no backing file.
 

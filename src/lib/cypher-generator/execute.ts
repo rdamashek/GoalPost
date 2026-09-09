@@ -264,22 +264,13 @@ async function mapNodesToEnclosingSpaces(
       continue
     }
 
-    if (labels.includes('Document')) {
-      // A Document is anchored ONLY to its owning FieldContext's Space via the
-      // HAS_DOCUMENT context edge (KB: "inherits read access from the parent
-      // Space"). Do NOT let it fall through to the generic *1..3 fallback: that
-      // undirected sweep could anchor the doc through its uploader's unrelated
-      // spaces (e.g. (doc)-[:UPLOADED_BY]->(:User)<-[:IS_MEMBER]-(:SpaceMembership)
-      // <-[:HAS_MEMBER]-(:Space)) and over-expose it. Fail closed to the field.
-      const r = await runRead(
-        `MATCH (:Document {id: $id})<-[:HAS_DOCUMENT]-(:FieldContext)<-[:HAS_CONTEXT]-(s:Space) RETURN collect(DISTINCT s.id) AS sids`,
-        { id }
-      )
-      const sids = (r.records[0]?.get('sids') as string[] | null) ?? []
-      for (const sid of sids) anchors.add(sid)
-      result.set(id, anchors)
-      continue
-    }
+    // GOAL-354 removed the dedicated :Document branch that used to sit here.
+    // A document is a ResourcePulse now, so it is anchored by the
+    // CONTENT_VIA_SPACE FieldPulse branch below, through the same HAS_PULSE
+    // edge as every other pulse. That branch is equally fail-closed — it
+    // anchors strictly via the owning FieldContext and never falls through to
+    // the generic *1..3 sweep, which could otherwise reach the uploader's
+    // unrelated Spaces through UPLOADED_BY and over-expose the document.
 
     // `labels.some(...)` rather than `CONTENT_VIA_SPACE.has(labels[0])`: Neo4j
     // gives NO ordering guarantee on a node's labels, and migrated core values
